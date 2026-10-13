@@ -1,0 +1,3145 @@
+The issue was in the global pointerdown listener on window:
+
+this.onWin = () => this.closePop();
+window.addEventListener("pointerdown", this.onWin);
+
+When a user left-clicked any item in a menu popup, pointerdown bubbled up to
+window and invoked this.closePop(), setting pop.hidden = true (display: none).
+Because the menu item was hidden and removed from layout before pointerup, the
+browser never dispatched the click event on the button, preventing menu actions
+from firing.
+
+Fixes Applied
+
+1.  Menu Item Click Handling:
+
+      - this.onWin now checks e.target.closest(".nl-menuwrap") and
+        e.target.closest(".nl-help"). Clicks inside menus or dialogs no longer
+        close the menu before the click event is dispatched.
+      - Clicking a menu item now cleanly executes its command and closes the
+        dropdown.
+      - Added pointerenter tracking across top-level menu buttons: if a menu is
+        open, hovering adjacent menu items (File, Draw, Modify, View) smoothly
+        switches menus without requiring extra clicks.
+      - Clicking the background backdrop of the Help modal now closes it.
+
+2.  Keyboard Typing Without Requiring Focus Click:
+
+      - Typing directly into the drawing desk now routes keys straight to the
+        command line input (AutoCAD style), so you can type L <Enter> or C
+        <Space> immediately after interacting with the canvas without having to
+        click the input box first.
+      - Added ArrowDown to the command line history.
+
+3.  Drafting Preview Visibility:
+
+      - In LINE and COPY, earlier segments now remain visible while drafting
+        subsequent points rather than disappearing on cursor move.
+
+Here is the updated northline.js file:
+
+--- START OF FILE northline.js ---
+
+/* Northline — vanilla JavaScript CAD. No libraries, no build step, no server.
+   Open index.html in a browser. This file is one classic script so it also
+   works from a local file (file://), not only from a web server.
+*/
+(function (root) {
+  "use strict";
+  var cache = Object.create(null);
+  var factories = Object.create(null);
+  function req(spec) {
+    var id = spec.replace(/^\.\//, "").replace(/\.js$/, ".ts");
+    if (!/\.ts$/.test(id)) id += ".ts";
+    var hit = cache[id];
+    if (hit) return hit.exports;
+    var factory = factories[id];
+    if (!factory) throw new Error("Missing module " + spec);
+    var module = { exports: {} };
+    cache[id] = module;
+    factory(module.exports, req, module);
+    return module.exports;
+  }
+
+  factories["math.ts"] = function (exports, require, module) {
+
+    Object.defineProperty(exports, "__esModule", { value: true });
+    exports.EMPTY = exports.TAU = void 0;
+    exports.pt = pt;
+    exports.add = add;
+    exports.sub = sub;
+    exports.mul = mul;
+    exports.dot = dot;
+    exports.cross = cross;
+    exports.len = len;
+    exports.dist = dist;
+    exports.norm = norm;
+    exports.lerp = lerp;
+    exports.rot = rot;
+    exports.angOf = angOf;
+    exports.normAng = normAng;
+    exports.ccwSweep = ccwSweep;
+    exports.angInSweep = angInSweep;
+    exports.clamp = clamp;
+    exports.fmt = fmt;
+    exports.boxEmpty = boxEmpty;
+    exports.boxAdd = boxAdd;
+    exports.boxUnion = boxUnion;
+    exports.boxCenter = boxCenter;
+    exports.pointInBox = pointInBox;
+    exports.boxInside = boxInside;
+    exports.boxIntersects = boxIntersects;
+    exports.boxFromCorners = boxFromCorners;
+    exports.expandBox = expandBox;
+    exports.TAU = Math.PI * 2;
+    function pt(x, y) {
+        return { x, y };
+    }
+    function add(a, b) {
+        return { x: a.x + b.x, y: a.y + b.y };
+    }
+    function sub(a, b) {
+        return { x: a.x - b.x, y: a.y - b.y };
+    }
+    function mul(a, s) {
+        return { x: a.x * s, y: a.y * s };
+    }
+    function dot(a, b) {
+        return a.x * b.x + a.y * b.y;
+    }
+    function cross(a, b) {
+        return a.x * b.y - a.y * b.x;
+    }
+    function len(a) {
+        return Math.hypot(a.x, a.y);
+    }
+    function dist(a, b) {
+        return Math.hypot(a.x - b.x, a.y - b.y);
+    }
+    function norm(a) {
+        const l = len(a);
+        if (l < 1e-15)
+            return { x: 0, y: 0 };
+        return { x: a.x / l, y: a.y / l };
+    }
+    function lerp(a, b, t) {
+        return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+    }
+    function rot(a, ang) {
+        const c = Math.cos(ang);
+        const s = Math.sin(ang);
+        return { x: a.x * c - a.y * s, y: a.x * s + a.y * c };
+    }
+    function angOf(a) {
+        return Math.atan2(a.y, a.x);
+    }
+    function normAng(a) {
+        const t = a % exports.TAU;
+        return t < 0 ? t + exports.TAU : t;
+    }
+    /** CCW sweep from a0 to a1, in (0, 2π]. A zero difference is a full turn. */
+    function ccwSweep(a0, a1) {
+        const s = normAng(a1 - a0);
+        return s < 1e-12 ? exports.TAU : s;
+    }
+    function angInSweep(a, a0, sweep, eps = 1e-6) {
+        if (sweep >= exports.TAU - 1e-8)
+            return true;
+        const d = normAng(a - a0);
+        return d <= sweep + eps || d >= exports.TAU - eps;
+    }
+    function clamp(n, a, b) {
+        return Math.max(a, Math.min(b, n));
+    }
+    function fmt(n, prec = 4) {
+        if (!Number.isFinite(n))
+            return "—";
+        const v = Math.round(n * 10 ** prec) / 10 ** prec;
+        return v.toFixed(prec);
+    }
+    exports.EMPTY = { minx: Infinity, miny: Infinity, maxx: -Infinity, maxy: -Infinity };
+    function boxEmpty(b) {
+        return !(b.minx <= b.maxx && b.miny <= b.maxy);
+    }
+    function boxAdd(b, p, pad = 0) {
+        return {
+            minx: Math.min(b.minx, p.x - pad),
+            miny: Math.min(b.miny, p.y - pad),
+            maxx: Math.max(b.maxx, p.x + pad),
+            maxy: Math.max(b.maxy, p.y + pad),
+        };
+    }
+    function boxUnion(a, b) {
+        if (boxEmpty(a))
+            return b;
+        if (boxEmpty(b))
+            return a;
+        return {
+            minx: Math.min(a.minx, b.minx),
+            miny: Math.min(a.miny, b.miny),
+            maxx: Math.max(a.maxx, b.maxx),
+            maxy: Math.max(a.maxy, b.maxy),
+        };
+    }
+    function boxCenter(b) {
+        return { x: (b.minx + b.maxx) / 2, y: (b.miny + b.maxy) / 2 };
+    }
+    function pointInBox(p, b, eps = 0) {
+        return p.x >= b.minx - eps && p.x <= b.maxx + eps && p.y >= b.miny - eps && p.y <= b.maxy + eps;
+    }
+    function boxInside(inner, outer) {
+        return inner.minx >= outer.minx && inner.miny >= outer.miny && inner.maxx <= outer.maxx && inner.maxy <= outer.maxy;
+    }
+    function boxIntersects(a, b) {
+        return a.minx <= b.maxx && a.maxx >= b.minx && a.miny <= b.maxy && a.maxy >= b.miny;
+    }
+    function boxFromCorners(a, b) {
+        return {
+            minx: Math.min(a.x, b.x),
+            miny: Math.min(a.y, b.y),
+            maxx: Math.max(a.x, b.x),
+            maxy: Math.max(a.y, b.y),
+        };
+    }
+    function expandBox(b, m) {
+        return { minx: b.minx - m, miny: b.miny - m, maxx: b.maxx + m, maxy: b.maxy + m };
+    }
+
+  };
+
+  factories["aci.ts"] = function (exports, require, module) {
+
+    /** AutoCAD Color Index → RGB. 1–255, with 0 and 256 left to the caller (byblock / bylayer). */
+    Object.defineProperty(exports, "__esModule", { value: true });
+    exports.ACI_SWATCHES = void 0;
+    exports.aciRgb = aciRgb;
+    exports.aciHex = aciHex;
+    exports.nearestAci = nearestAci;
+    const LEVELS = [255, 204, 153, 127, 76];
+    const FIXED = {
+        1: [255, 0, 0],
+        2: [255, 255, 0],
+        3: [0, 255, 0],
+        4: [0, 255, 255],
+        5: [0, 0, 255],
+        6: [255, 0, 255],
+        7: [255, 255, 255],
+        8: [128, 128, 128],
+        9: [192, 192, 192],
+        250: [51, 51, 51],
+        251: [91, 91, 91],
+        252: [132, 132, 132],
+        253: [173, 173, 173],
+        254: [214, 214, 214],
+        255: [255, 255, 255],
+    };
+    function hueRGB(h) {
+        const q = Math.floor(h / 4);
+        const m = h % 4;
+        const rise = [0, 63, 127, 191][m] ?? 0;
+        const fall = [255, 191, 127, 63][m] ?? 255;
+        switch (q) {
+            case 0:
+                return [255, rise, 0];
+            case 1:
+                return [fall, 255, 0];
+            case 2:
+                return [0, 255, rise];
+            case 3:
+                return [0, fall, 255];
+            case 4:
+                return [rise, 0, 255];
+            default:
+                return [255, 0, fall];
+        }
+    }
+    const TABLE = [];
+    function build() {
+        for (let i = 0; i < 256; i++)
+            TABLE.push([255, 255, 255]);
+        for (let i = 1; i <= 9; i++)
+            TABLE[i] = FIXED[i];
+        for (let i = 250; i <= 255; i++)
+            TABLE[i] = FIXED[i];
+        for (let index = 10; index <= 249; index++) {
+            const n = index - 10;
+            const hue = hueRGB(Math.floor(n / 10));
+            const s = n % 10;
+            const level = LEVELS[Math.floor(s / 2)] ?? 255;
+            const even = [
+                Math.round((hue[0] * level) / 255),
+                Math.round((hue[1] * level) / 255),
+                Math.round((hue[2] * level) / 255),
+            ];
+            TABLE[index] =
+                s % 2 === 0
+                    ? even
+                    : [
+                        Math.floor((level + even[0]) / 2),
+                        Math.floor((level + even[1]) / 2),
+                        Math.floor((level + even[2]) / 2),
+                    ];
+        }
+    }
+    build();
+    function aciRgb(index) {
+        const i = Math.max(1, Math.min(255, index | 0));
+        return TABLE[i] ?? [255, 255, 255];
+    }
+    function aciHex(index, color7 = "#f4f1ea") {
+        if ((index | 0) === 7)
+            return color7;
+        const [r, g, b] = aciRgb(index);
+        return `#${r.toString(16).padStart(2, "0")}${g.toString(16).padStart(2, "0")}${b.toString(16).padStart(2, "0")}`;
+    }
+    /** Nearest ACI 1–255 for an arbitrary hex, used when a file carries truecolor. */
+    function nearestAci(r, g, b) {
+        let best = 7;
+        let bestD = Infinity;
+        for (let i = 1; i <= 255; i++) {
+            const c = TABLE[i];
+            const d = (c[0] - r) ** 2 + (c[1] - g) ** 2 + (c[2] - b) ** 2;
+            if (d < bestD) {
+                bestD = d;
+                best = i;
+            }
+        }
+        return best;
+    }
+    exports.ACI_SWATCHES = [
+        { aci: 1, name: "Red" },
+        { aci: 2, name: "Yellow" },
+        { aci: 3, name: "Green" },
+        { aci: 4, name: "Cyan" },
+        { aci: 5, name: "Blue" },
+        { aci: 6, name: "Magenta" },
+        { aci: 7, name: "White" },
+        { aci: 8, name: "Gray" },
+        { aci: 9, name: "Silver" },
+        { aci: 30, name: "Orange" },
+        { aci: 40, name: "Gold" },
+        { aci: 140, name: "Sky" },
+        { aci: 150, name: "Navy" },
+    ];
+
+  };
+
+  factories["geom.ts"] = function (exports, require, module) {
+
+    Object.defineProperty(exports, "__esModule", { value: true });
+    exports.angOf = void 0;
+    exports.leftNorm = leftNorm;
+    exports.bulgeArc = bulgeArc;
+    exports.arcPoint = arcPoint;
+    exports.circumcircle = circumcircle;
+    exports.arcThrough = arcThrough;
+    exports.lineIntersect = lineIntersect;
+    exports.projParam = projParam;
+    exports.closestOnSeg = closestOnSeg;
+    exports.lineCircle = lineCircle;
+    exports.circleCircle = circleCircle;
+    exports.curveHits = curveHits;
+    exports.segHitsBox = segHitsBox;
+    exports.pointInPoly = pointInPoly;
+    exports.tessellate = tessellate;
+    exports.polyCurves = polyCurves;
+    exports.offsetLine = offsetLine;
+    exports.offsetOpenPoly = offsetOpenPoly;
+    exports.offsetClosedPoly = offsetClosedPoly;
+    exports.sideOfPoly = sideOfPoly;
+    exports.filletLines = filletLines;
+    exports.chamferLines = chamferLines;
+    exports.trimParamLine = trimParamLine;
+    exports.extendLineTo = extendLineTo;
+    exports.mirrorPoint = mirrorPoint;
+    exports.mirrorVector = mirrorVector;
+    exports.tangentPoints = tangentPoints;
+    exports.arcBox = arcBox;
+    exports.closestOnCurve = closestOnCurve;
+    exports.rayHits = rayHits;
+    exports.angleDiff = angleDiff;
+    exports.collinear = collinear;
+    const math_ts_1 = require("./math.ts");
+    Object.defineProperty(exports, "angOf", { enumerable: true, get: function () { return math_ts_1.angOf; } });
+    function leftNorm(a, b) {
+        return (0, math_ts_1.norm)({ x: -(b.y - a.y), y: b.x - a.x });
+    }
+    /** Signed bulge → arc. Sweep is signed (CCW positive). */
+    function bulgeArc(p1, p2, bulge) {
+        if (!Number.isFinite(bulge) || Math.abs(bulge) < 1e-12)
+            return null;
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const cLen = Math.hypot(dx, dy);
+        if (cLen < 1e-12)
+            return null;
+        const theta = 4 * Math.atan(bulge);
+        const rSigned = cLen / (2 * Math.sin(theta / 2));
+        const r = Math.abs(rSigned);
+        if (!Number.isFinite(r) || r < 1e-12)
+            return null;
+        const mx = (p1.x + p2.x) / 2;
+        const my = (p1.y + p2.y) / 2;
+        const inv = 1 / cLen;
+        const nx = -dy * inv;
+        const ny = dx * inv;
+        const offset = rSigned * Math.cos(theta / 2);
+        const c = { x: mx + nx * offset, y: my + ny * offset };
+        const a0 = Math.atan2(p1.y - c.y, p1.x - c.x);
+        return { c, r, a0, sweep: theta };
+    }
+    function arcPoint(c, r, a) {
+        return { x: c.x + Math.cos(a) * r, y: c.y + Math.sin(a) * r };
+    }
+    function circumcircle(a, b, c) {
+        const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+        if (Math.abs(d) < 1e-12)
+            return null;
+        const a2 = a.x * a.x + a.y * a.y;
+        const b2 = b.x * b.x + b.y * b.y;
+        const c2 = c.x * c.x + c.y * c.y;
+        const ux = (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d;
+        const uy = (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d;
+        const center = { x: ux, y: uy };
+        return { c: center, r: (0, math_ts_1.dist)(center, a) };
+    }
+    /** Arc through a → b → c. */
+    function arcThrough(a, b, c) {
+        const circ = circumcircle(a, b, c);
+        if (!circ || circ.r < 1e-12)
+            return null;
+        const aA = Math.atan2(a.y - circ.c.y, a.x - circ.c.x);
+        const aB = Math.atan2(b.y - circ.c.y, b.x - circ.c.x);
+        const aC = Math.atan2(c.y - circ.c.y, c.x - circ.c.x);
+        const sweep = (0, math_ts_1.ccwSweep)(aA, aC);
+        if ((0, math_ts_1.angInSweep)(aB, aA, sweep))
+            return { c: circ.c, r: circ.r, a0: aA, sweep };
+        return { c: circ.c, r: circ.r, a0: aC, sweep: (0, math_ts_1.ccwSweep)(aC, aA) };
+    }
+    function lineIntersect(a, b, c, d, segment) {
+        const r = (0, math_ts_1.sub)(b, a);
+        const s = (0, math_ts_1.sub)(d, c);
+        const den = (0, math_ts_1.cross)(r, s);
+        if (Math.abs(den) < 1e-12)
+            return null;
+        const qp = (0, math_ts_1.sub)(c, a);
+        const t = (0, math_ts_1.cross)(qp, s) / den;
+        const u = (0, math_ts_1.cross)(qp, r) / den;
+        if (segment && (t < -1e-8 || t > 1 + 1e-8 || u < -1e-8 || u > 1 + 1e-8))
+            return null;
+        return (0, math_ts_1.add)(a, (0, math_ts_1.mul)(r, t));
+    }
+    function projParam(a, b, p) {
+        const ab = (0, math_ts_1.sub)(b, a);
+        const l2 = (0, math_ts_1.dot)(ab, ab);
+        if (l2 < 1e-18)
+            return 0;
+        return (0, math_ts_1.dot)((0, math_ts_1.sub)(p, a), ab) / l2;
+    }
+    function closestOnSeg(p, a, b) {
+        const t = (0, math_ts_1.clamp)(projParam(a, b, p), 0, 1);
+        const q = lerpClamped(a, b, t);
+        return { pt: q, t, d: (0, math_ts_1.dist)(p, q) };
+    }
+    function lerpClamped(a, b, t) {
+        return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+    }
+    function lineCircle(a, b, c, r, segment) {
+        const d = (0, math_ts_1.sub)(b, a);
+        const f = (0, math_ts_1.sub)(a, c);
+        const A = (0, math_ts_1.dot)(d, d);
+        if (A < 1e-18)
+            return [];
+        const B = 2 * (0, math_ts_1.dot)(f, d);
+        const C = (0, math_ts_1.dot)(f, f) - r * r;
+        let disc = B * B - 4 * A * C;
+        if (disc < -1e-8)
+            return [];
+        disc = Math.max(0, disc);
+        const s = Math.sqrt(disc);
+        const out = [];
+        for (const t of [(-B - s) / (2 * A), (-B + s) / (2 * A)]) {
+            if (segment && (t < -1e-8 || t > 1 + 1e-8))
+                continue;
+            out.push((0, math_ts_1.add)(a, (0, math_ts_1.mul)(d, t)));
+        }
+        return out;
+    }
+    function circleCircle(c0, r0, c1, r1) {
+        const d = (0, math_ts_1.dist)(c0, c1);
+        if (d < 1e-12 || d > r0 + r1 + 1e-7 || d < Math.abs(r0 - r1) - 1e-7)
+            return [];
+        const a = (r0 * r0 - r1 * r1 + d * d) / (2 * d);
+        const h = Math.sqrt(Math.max(0, r0 * r0 - a * a));
+        const dir = (0, math_ts_1.mul)((0, math_ts_1.sub)(c1, c0), 1 / d);
+        const p = (0, math_ts_1.add)(c0, (0, math_ts_1.mul)(dir, a));
+        if (h < 1e-8)
+            return [p];
+        const rx = -dir.y * h;
+        const ry = dir.x * h;
+        return [
+            { x: p.x + rx, y: p.y + ry },
+            { x: p.x - rx, y: p.y - ry },
+        ];
+    }
+    function onCurve(p, c, eps) {
+        switch (c.k) {
+            case "line": {
+                const t = projParam(c.a, c.b, p);
+                if (t < -eps || t > 1 + eps)
+                    return false;
+                return (0, math_ts_1.dist)(p, lerpClamped(c.a, c.b, (0, math_ts_1.clamp)(t, 0, 1))) <= eps;
+            }
+            case "ray": {
+                const v = (0, math_ts_1.sub)(p, c.p);
+                if ((0, math_ts_1.dot)(v, c.d) < -eps)
+                    return false;
+                return Math.abs((0, math_ts_1.cross)(v, c.d)) <= eps;
+            }
+            case "xline":
+                return Math.abs((0, math_ts_1.cross)((0, math_ts_1.sub)(p, c.p), c.d)) <= eps;
+            case "circle":
+                return Math.abs((0, math_ts_1.dist)(p, c.c) - c.r) <= eps;
+            case "arc": {
+                if (Math.abs((0, math_ts_1.dist)(p, c.c) - c.r) > eps)
+                    return false;
+                return (0, math_ts_1.angInSweep)(Math.atan2(p.y - c.c.y, p.x - c.c.x), c.a0, c.sweep, 1e-4);
+            }
+            default:
+                return false;
+        }
+    }
+    function lineOf(c) {
+        if (c.k === "line")
+            return { a: c.a, b: c.b, segment: true };
+        if (c.k === "ray")
+            return { a: c.p, b: (0, math_ts_1.add)(c.p, (0, math_ts_1.mul)(c.d, 1e6)), segment: false };
+        if (c.k === "xline")
+            return { a: (0, math_ts_1.add)(c.p, (0, math_ts_1.mul)(c.d, -1e6)), b: (0, math_ts_1.add)(c.p, (0, math_ts_1.mul)(c.d, 1e6)), segment: false };
+        return null;
+    }
+    function curveHits(a, b, eps = 1e-6) {
+        const la = lineOf(a);
+        const lb = lineOf(b);
+        let raw = [];
+        if (la && lb) {
+            const hit = lineIntersect(la.a, la.b, lb.a, lb.b, false);
+            if (hit)
+                raw = [hit];
+        }
+        else if (la && (b.k === "circle" || b.k === "arc")) {
+            raw = lineCircle(la.a, la.b, b.c, b.r, false);
+        }
+        else if (lb && (a.k === "circle" || a.k === "arc")) {
+            raw = lineCircle(lb.a, lb.b, a.c, a.r, false);
+        }
+        else if ((a.k === "circle" || a.k === "arc") && (b.k === "circle" || b.k === "arc")) {
+            raw = circleCircle(a.c, a.r, b.c, b.r);
+        }
+        return raw.filter((p) => onCurve(p, a, eps) && onCurve(p, b, eps));
+    }
+    function segHitsBox(a, b, box) {
+        if ((0, math_ts_1.pointInBox)(a, box) || (0, math_ts_1.pointInBox)(b, box))
+            return true;
+        const edges = [
+            [
+                { x: box.minx, y: box.miny },
+                { x: box.maxx, y: box.miny },
+            ],
+            [
+                { x: box.maxx, y: box.miny },
+                { x: box.maxx, y: box.maxy },
+            ],
+            [
+                { x: box.maxx, y: box.maxy },
+                { x: box.minx, y: box.maxy },
+            ],
+            [
+                { x: box.minx, y: box.maxy },
+                { x: box.minx, y: box.miny },
+            ],
+        ];
+        return edges.some(([c, d]) => lineIntersect(a, b, c, d, true) !== null);
+    }
+    function pointInPoly(p, poly) {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const a = poly[i];
+            const b = poly[j];
+            if (a.y > p.y !== b.y > p.y) {
+                const x = ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y || 1e-18) + a.x;
+                if (p.x < x)
+                    inside = !inside;
+            }
+        }
+        return inside;
+    }
+    function tessellate(pts, closed, step = Math.PI / 18) {
+        const n = pts.length;
+        const segCount = closed ? n : n - 1;
+        const out = [];
+        const push = (p) => {
+            const last = out[out.length - 1];
+            if (!last || (0, math_ts_1.dist)(last, p) > 1e-9)
+                out.push({ x: p.x, y: p.y });
+        };
+        for (let i = 0; i < segCount; i++) {
+            const p = pts[i];
+            const q = pts[(i + 1) % n];
+            const arc = p.b ? bulgeArc(p, q, p.b) : null;
+            if (!arc) {
+                push(p);
+                if (!closed && i === segCount - 1)
+                    push(q);
+                continue;
+            }
+            const steps = Math.max(2, Math.ceil(Math.abs(arc.sweep) / step));
+            for (let s = 0; s <= steps; s++) {
+                if (closed && i === segCount - 1 && s === steps)
+                    break;
+                const a = arc.a0 + arc.sweep * (s / steps);
+                push(arcPoint(arc.c, arc.r, a));
+            }
+        }
+        return out;
+    }
+    function polyCurves(pts, closed) {
+        const n = pts.length;
+        const segCount = closed ? n : Math.max(0, n - 1);
+        const curves = [];
+        for (let i = 0; i < segCount; i++) {
+            const p = pts[i];
+            const q = pts[(i + 1) % n];
+            const arc = p.b ? bulgeArc(p, q, p.b) : null;
+            if (!arc)
+                curves.push({ k: "line", a: p, b: q });
+            else {
+                const sweep = arc.sweep >= 0 ? arc.sweep : (0, math_ts_1.ccwSweep)(arc.a0 + arc.sweep, arc.a0);
+                const a0 = arc.sweep >= 0 ? arc.a0 : (0, math_ts_1.normAng)(arc.a0 + arc.sweep);
+                curves.push({ k: "arc", c: arc.c, r: arc.r, a0, sweep });
+            }
+        }
+        return curves;
+    }
+    function offsetLine(a, b, distance, side) {
+        const n = leftNorm(a, b);
+        if ((0, math_ts_1.len)(n) < 0.5)
+            return null;
+        const sign = (0, math_ts_1.dot)((0, math_ts_1.sub)(side, a), n) >= 0 ? 1 : -1;
+        const o = (0, math_ts_1.mul)(n, distance * sign);
+        return [(0, math_ts_1.add)(a, o), (0, math_ts_1.add)(b, o)];
+    }
+    function offsetOpenPoly(pts, distanceSigned) {
+        if (pts.length < 2)
+            return null;
+        const lines = [];
+        for (let i = 0; i < pts.length - 1; i++) {
+            const p = pts[i];
+            const q = pts[i + 1];
+            const nrm = leftNorm(p, q);
+            if ((0, math_ts_1.len)(nrm) < 0.5)
+                continue;
+            const o = (0, math_ts_1.mul)(nrm, distanceSigned);
+            lines.push({ a: (0, math_ts_1.add)(p, o), b: (0, math_ts_1.add)(q, o) });
+        }
+        if (!lines.length)
+            return null;
+        const out = [lines[0].a];
+        for (let i = 1; i < lines.length; i++) {
+            const hit = lineIntersect(lines[i - 1].a, lines[i - 1].b, lines[i].a, lines[i].b, false);
+            if (!hit)
+                out.push(lines[i].a);
+            else {
+                const span = (0, math_ts_1.dist)(hit, lines[i].a);
+                if (span > Math.abs(distanceSigned) * 6)
+                    out.push(lines[i - 1].b, lines[i].a);
+                else
+                    out.push(hit);
+            }
+        }
+        out.push(lines[lines.length - 1].b);
+        return out;
+    }
+    function offsetClosedPoly(pts, distanceSigned) {
+        if (pts.length < 3)
+            return null;
+        const n = pts.length;
+        const lines = [];
+        for (let i = 0; i < n; i++) {
+            const p = pts[i];
+            const q = pts[(i + 1) % n];
+            const nrm = leftNorm(p, q);
+            if ((0, math_ts_1.len)(nrm) < 0.5)
+                return null;
+            const o = (0, math_ts_1.mul)(nrm, distanceSigned);
+            lines.push({ a: (0, math_ts_1.add)(p, o), b: (0, math_ts_1.add)(q, o) });
+        }
+        const out = [];
+        for (let i = 0; i < n; i++) {
+            const prev = lines[(i - 1 + n) % n];
+            const cur = lines[i];
+            const hit = lineIntersect(prev.a, prev.b, cur.a, cur.b, false);
+            if (!hit)
+                return null;
+            if ((0, math_ts_1.dist)(hit, cur.a) > Math.abs(distanceSigned) * 8)
+                out.push(prev.b, cur.a);
+            else
+                out.push(hit);
+        }
+        return out;
+    }
+    function sideOfPoly(pts, side) {
+        let best = Infinity;
+        let sign = 1;
+        for (let i = 0; i < pts.length - 1; i++) {
+            const a = pts[i];
+            const b = pts[i + 1];
+            const c = closestOnSeg(side, a, b);
+            if (c.d < best) {
+                best = c.d;
+                const n = leftNorm(a, b);
+                sign = (0, math_ts_1.dot)((0, math_ts_1.sub)(side, a), n) >= 0 ? 1 : -1;
+            }
+        }
+        return sign;
+    }
+    /** Fillet two finite lines. Radius 0 trims them to the intersection. Picks choose the kept side. */
+    function filletLines(a1, a2, b1, b2, radius, pickA, pickB) {
+        const I = lineIntersect(a1, a2, b1, b2, false);
+        if (!I)
+            return null;
+        const u = (0, math_ts_1.norm)((0, math_ts_1.sub)(closestOnSeg(pickA, a1, a2).pt, I));
+        const v = (0, math_ts_1.norm)((0, math_ts_1.sub)(closestOnSeg(pickB, b1, b2).pt, I));
+        if ((0, math_ts_1.len)(u) < 0.5 || (0, math_ts_1.len)(v) < 0.5)
+            return null;
+        const keep = (p1, p2, dir, tangent) => {
+            const d1 = (0, math_ts_1.dot)((0, math_ts_1.sub)(p1, I), dir);
+            const d2 = (0, math_ts_1.dot)((0, math_ts_1.sub)(p2, I), dir);
+            const far = d1 >= d2 ? p1 : p2;
+            return [tangent, far];
+        };
+        if (radius <= 1e-9) {
+            return { arc: null, a: keep(a1, a2, u, I), b: keep(b1, b2, v, I) };
+        }
+        const cos = (0, math_ts_1.clamp)((0, math_ts_1.dot)(u, v), -1, 1);
+        const phi = Math.acos(cos) / 2;
+        if (phi < 1e-4 || (Math.abs(Math.PI / 2 - phi) < 1e-6 && false))
+            return null;
+        if (phi < 1e-3 || phi > Math.PI / 2 - 1e-4)
+            return null;
+        const bis = (0, math_ts_1.norm)((0, math_ts_1.add)(u, v));
+        if ((0, math_ts_1.len)(bis) < 0.5)
+            return null;
+        const center = (0, math_ts_1.add)(I, (0, math_ts_1.mul)(bis, radius / Math.sin(phi)));
+        const tA = (0, math_ts_1.add)(I, (0, math_ts_1.mul)(u, radius / Math.tan(phi)));
+        const tB = (0, math_ts_1.add)(I, (0, math_ts_1.mul)(v, radius / Math.tan(phi)));
+        const aA = Math.atan2(tA.y - center.y, tA.x - center.x);
+        const aB = Math.atan2(tB.y - center.y, tB.x - center.x);
+        const mid = Math.atan2(I.y - center.y, I.x - center.x);
+        let a0 = aA;
+        let sweep = (0, math_ts_1.ccwSweep)(aA, aB);
+        if (!(0, math_ts_1.angInSweep)(mid, a0, sweep)) {
+            a0 = aB;
+            sweep = (0, math_ts_1.ccwSweep)(aB, aA);
+        }
+        if (sweep > Math.PI + 1e-3)
+            return null;
+        return {
+            arc: { c: center, r: radius, a0, sweep },
+            a: keep(a1, a2, u, tA),
+            b: keep(b1, b2, v, tB),
+        };
+    }
+    function chamferLines(a1, a2, b1, b2, da, db, pickA, pickB) {
+        const I = lineIntersect(a1, a2, b1, b2, false);
+        if (!I)
+            return null;
+        const u = (0, math_ts_1.norm)((0, math_ts_1.sub)(closestOnSeg(pickA, a1, a2).pt, I));
+        const v = (0, math_ts_1.norm)((0, math_ts_1.sub)(closestOnSeg(pickB, b1, b2).pt, I));
+        if ((0, math_ts_1.len)(u) < 0.5 || (0, math_ts_1.len)(v) < 0.5)
+            return null;
+        const tA = (0, math_ts_1.add)(I, (0, math_ts_1.mul)(u, Math.max(0, da)));
+        const tB = (0, math_ts_1.add)(I, (0, math_ts_1.mul)(v, Math.max(0, db)));
+        const keep = (p1, p2, dir, tangent) => {
+            const d1 = (0, math_ts_1.dot)((0, math_ts_1.sub)(p1, I), dir);
+            const d2 = (0, math_ts_1.dot)((0, math_ts_1.sub)(p2, I), dir);
+            return [tangent, d1 >= d2 ? p1 : p2];
+        };
+        return { a: keep(a1, a2, u, tA), b: keep(b1, b2, v, tB), chord: [tA, tB] };
+    }
+    function trimParamLine(a, b, cuts, pick) {
+        const ab = (0, math_ts_1.sub)(b, a);
+        const ts = [0, 1];
+        for (const hit of cuts) {
+            const t = projParam(a, b, hit);
+            if (t > 1e-5 && t < 1 - 1e-5)
+                ts.push(t);
+        }
+        ts.sort((x, y) => x - y);
+        const uniq = [];
+        for (const t of ts)
+            if (!uniq.length || t - uniq[uniq.length - 1] > 1e-5)
+                uniq.push(t);
+        if (uniq.length < 3)
+            return null;
+        const tPick = (0, math_ts_1.clamp)(projParam(a, b, pick), 0, 1);
+        let span = 0;
+        for (let i = 0; i < uniq.length - 1; i++) {
+            if (tPick >= uniq[i] - 1e-6 && tPick <= uniq[i + 1] + 1e-6) {
+                span = i;
+                break;
+            }
+        }
+        const parts = [];
+        for (let i = 0; i < uniq.length - 1; i++) {
+            if (i === span)
+                continue;
+            parts.push([(0, math_ts_1.add)(a, (0, math_ts_1.mul)(ab, uniq[i])), (0, math_ts_1.add)(a, (0, math_ts_1.mul)(ab, uniq[i + 1]))]);
+        }
+        return parts;
+    }
+    function extendLineTo(a, b, pick, hits) {
+        const endIsA = (0, math_ts_1.dist)(pick, a) <= (0, math_ts_1.dist)(pick, b);
+        const origin = endIsA ? a : b;
+        const other = endIsA ? b : a;
+        const dir = (0, math_ts_1.norm)((0, math_ts_1.sub)(origin, other));
+        if ((0, math_ts_1.len)(dir) < 0.5)
+            return null;
+        let best = null;
+        let bestT = Infinity;
+        for (const h of hits) {
+            const t = (0, math_ts_1.dot)((0, math_ts_1.sub)(h, origin), dir);
+            if (t > 1e-5 && t < bestT) {
+                bestT = t;
+                best = h;
+            }
+        }
+        if (!best)
+            return null;
+        return endIsA ? [best, b] : [a, best];
+    }
+    function mirrorPoint(p, a, b) {
+        const d = (0, math_ts_1.sub)(b, a);
+        const l2 = (0, math_ts_1.dot)(d, d) || 1e-18;
+        const t = (0, math_ts_1.dot)((0, math_ts_1.sub)(p, a), d) / l2;
+        const proj = (0, math_ts_1.add)(a, (0, math_ts_1.mul)(d, t));
+        return { x: 2 * proj.x - p.x, y: 2 * proj.y - p.y };
+    }
+    function mirrorVector(v, a, b) {
+        const d = (0, math_ts_1.norm)((0, math_ts_1.sub)(b, a));
+        const proj = (0, math_ts_1.mul)(d, (0, math_ts_1.dot)(v, d));
+        return (0, math_ts_1.sub)((0, math_ts_1.mul)(proj, 2), v);
+    }
+    function tangentPoints(c, r, from) {
+        const d = (0, math_ts_1.dist)(from, c);
+        if (d <= r + 1e-8)
+            return [];
+        const alpha = Math.acos((0, math_ts_1.clamp)(r / d, -1, 1));
+        const base = Math.atan2(from.y - c.y, from.x - c.x);
+        return [arcPoint(c, r, base + alpha), arcPoint(c, r, base - alpha)];
+    }
+    function arcBox(c, r, a0, sweep) {
+        let b = (0, math_ts_1.boxFromCorners)(arcPoint(c, r, a0), arcPoint(c, r, a0 + sweep));
+        for (const card of [0, Math.PI / 2, Math.PI, (3 * Math.PI) / 2]) {
+            if ((0, math_ts_1.angInSweep)(card, a0, sweep))
+                b = { ...boxAddLoose(b, arcPoint(c, r, card)) };
+        }
+        return b;
+    }
+    function boxAddLoose(b, p) {
+        return {
+            minx: Math.min(b.minx, p.x),
+            miny: Math.min(b.miny, p.y),
+            maxx: Math.max(b.maxx, p.x),
+            maxy: Math.max(b.maxy, p.y),
+        };
+    }
+    function closestOnCurve(p, c) {
+        switch (c.k) {
+            case "line": {
+                const q = closestOnSeg(p, c.a, c.b);
+                return { pt: q.pt, d: q.d };
+            }
+            case "ray":
+            case "xline": {
+                const t = (0, math_ts_1.dot)((0, math_ts_1.sub)(p, c.p), c.d);
+                if (c.k === "ray" && t < 0)
+                    return { pt: c.p, d: (0, math_ts_1.dist)(p, c.p) };
+                const q = (0, math_ts_1.add)(c.p, (0, math_ts_1.mul)(c.d, t));
+                return { pt: q, d: (0, math_ts_1.dist)(p, q) };
+            }
+            case "circle":
+            case "arc": {
+                const a = Math.atan2(p.y - c.c.y, p.x - c.c.x);
+                if (c.k === "arc" && !(0, math_ts_1.angInSweep)(a, c.a0, c.sweep)) {
+                    const s = arcPoint(c.c, c.r, c.a0);
+                    const e = arcPoint(c.c, c.r, c.a0 + c.sweep);
+                    return (0, math_ts_1.dist)(p, s) < (0, math_ts_1.dist)(p, e) ? { pt: s, d: (0, math_ts_1.dist)(p, s) } : { pt: e, d: (0, math_ts_1.dist)(p, e) };
+                }
+                const q = arcPoint(c.c, c.r, a);
+                return { pt: q, d: (0, math_ts_1.dist)(p, q) };
+            }
+            default:
+                return null;
+        }
+    }
+    function rayHits(origin, dir, c) {
+        const ray = { k: "ray", p: origin, d: (0, math_ts_1.norm)(dir) };
+        return curveHits(ray, c);
+    }
+    function angleDiff(a, b) {
+        let d = (0, math_ts_1.normAng)(a - b);
+        if (d > Math.PI)
+            d = Math.PI * 2 - d;
+        return d;
+    }
+    function collinear(a, b, c, tol) {
+        const ab = (0, math_ts_1.len)((0, math_ts_1.sub)(b, a)) || 1;
+        return Math.abs((0, math_ts_1.cross)((0, math_ts_1.sub)(b, a), (0, math_ts_1.sub)(c, a))) / ab <= tol;
+    }
+
+  };
+
+  factories["entities.ts"] = function (exports, require, module) {
+
+    Object.defineProperty(exports, "__esModule", { value: true });
+    exports.WEIGHTS = exports.LINETYPES = void 0;
+    exports.uid = uid;
+    exports.peekId = peekId;
+    exports.resetIds = resetIds;
+    exports.defaultLayers = defaultLayers;
+    exports.layerOf = layerOf;
+    exports.cloneEnt = cloneEnt;
+    exports.retag = retag;
+    exports.insertMap = insertMap;
+    exports.placedInsert = placedInsert;
+    exports.translateEnt = translateEnt;
+    exports.rotateEnt = rotateEnt;
+    exports.scaleEnt = scaleEnt;
+    exports.mirrorEnt = mirrorEnt;
+    exports.entityBBox = entityBBox;
+    exports.catmull = catmull;
+    exports.splineSamples = splineSamples;
+    exports.ellipsePoint = ellipsePoint;
+    exports.ellipseSamples = ellipseSamples;
+    exports.curvesOf = curvesOf;
+    exports.hitDist = hitDist;
+    exports.hatchContains = hatchContains;
+    exports.hitsRect = hitsRect;
+    exports.gripsOf = gripsOf;
+    exports.applyGrip = applyGrip;
+    exports.stretchEnt = stretchEnt;
+    exports.explodeEnt = explodeEnt;
+    exports.dimPoints = dimPoints;
+    exports.explodeDim = explodeDim;
+    exports.linearDimGeom = linearDimGeom;
+    exports.resolvedPaint = resolvedPaint;
+    exports.visibleEnt = visibleEnt;
+    exports.editableEnt = editableEnt;
+    exports.snapEligible = snapEligible;
+    exports.trimEntity = trimEntity;
+    exports.extendEntity = extendEntity;
+    exports.breakEntity = breakEntity;
+    exports.describeEnt = describeEnt;
+    exports.areaOf = areaOf;
+    const aci_ts_1 = require("./aci.ts");
+    const geom_ts_1 = require("./geom.ts");
+    const math_ts_1 = require("./math.ts");
+    let seq = 1;
+    function uid() {
+        return (seq++).toString(36);
+    }
+    function peekId() {
+        return seq;
+    }
+    function resetIds(n) {
+        seq = Math.max(seq, n);
+    }
+    exports.LINETYPES = [
+        "continuous",
+        "dashed",
+        "hidden",
+        "center",
+        "phantom",
+        "dot",
+        "dashdot",
+        "divide",
+    ];
+    exports.WEIGHTS = [0, 0.05, 0.09, 0.13, 0.15, 0.18, 0.2, 0.25, 0.3, 0.35, 0.4, 0.5, 0.53, 0.6, 0.7, 0.8, 0.9, 1, 1.06, 1.2, 1.4, 1.58, 2, 2.11];
+    function defaultLayers() {
+        return [
+            { name: "0", color: 7, lt: "continuous", lw: 0.25, on: true, frozen: false, locked: false },
+            { name: "Outline", color: 4, lt: "continuous", lw: 0.5, on: true, frozen: false, locked: false },
+            { name: "Center", color: 1, lt: "center", lw: 0.18, on: true, frozen: false, locked: false },
+            { name: "Hidden", color: 2, lt: "hidden", lw: 0.18, on: true, frozen: false, locked: false },
+            { name: "Hatch", color: 8, lt: "continuous", lw: 0.13, on: true, frozen: false, locked: false },
+            { name: "Dim", color: 3, lt: "continuous", lw: 0.13, on: true, frozen: false, locked: false },
+            { name: "Text", color: 7, lt: "continuous", lw: 0.13, on: true, frozen: false, locked: false },
+            { name: "Construction", color: 6, lt: "phantom", lw: 0.13, on: true, frozen: false, locked: false },
+        ];
+    }
+    function layerOf(layers, name) {
+        return layers.find((l) => l.name.toLowerCase() === name.toLowerCase()) ?? layers[0] ?? defaultLayers()[0];
+    }
+    function cloneEnt(e) {
+        return structuredClone(e);
+    }
+    function retag(e) {
+        const c = cloneEnt(e);
+        c.id = uid();
+        return c;
+    }
+    function childLayer(child, host) {
+        const c = cloneEnt(child);
+        if (c.layer === "0")
+            c.layer = host.layer;
+        if (c.color === "byblock")
+            c.color = host.color === "byblock" ? "bylayer" : host.color;
+        if (c.lt === "byblock")
+            c.lt = host.lt === "byblock" ? "bylayer" : host.lt;
+        if (c.lw === "byblock")
+            c.lw = host.lw === "byblock" ? "bylayer" : host.lw;
+        return c;
+    }
+    function insertMap(ins, block, p) {
+        const x = (p.x - block.base.x) * ins.sx;
+        const y = (p.y - block.base.y) * ins.sy;
+        const co = Math.cos(ins.rot);
+        const si = Math.sin(ins.rot);
+        return { x: ins.p.x + x * co - y * si, y: ins.p.y + x * si + y * co };
+    }
+    function placedInsert(ins, block) {
+        const uniform = Math.abs(Math.abs(ins.sx) - Math.abs(ins.sy)) < 1e-9;
+        const scale = Math.abs(ins.sx) || 1;
+        const mirror = ins.sx * ins.sy < 0;
+        return block.ents.map((raw) => {
+            const e = childLayer(raw, ins);
+            return mapEnt(e, (p) => insertMap(ins, block, p), {
+                scale,
+                mirror,
+                uniform,
+                rot: ins.rot * (mirror ? -1 : 1),
+            });
+        });
+    }
+    function mapEnt(e, fn, opt) {
+        const c = cloneEnt(e);
+        const sc = opt.scale;
+        switch (c.type) {
+            case "line":
+                c.a = fn(c.a);
+                c.b = fn(c.b);
+                return c;
+            case "point":
+            case "text":
+                if (c.type === "point")
+                    c.p = fn(c.p);
+                else {
+                    c.p = fn(c.p);
+                    c.h *= sc;
+                    c.rot += opt.rot;
+                    if (opt.mirror)
+                        c.rot = -c.rot;
+                }
+                return c;
+            case "circle":
+            case "donut":
+                if (c.type === "circle") {
+                    c.c = fn(c.c);
+                    c.r *= sc;
+                }
+                else {
+                    c.c = fn(c.c);
+                    c.ir *= sc;
+                    c.or *= sc;
+                }
+                return c;
+            case "arc": {
+                const s = fn((0, geom_ts_1.arcPoint)(c.c, c.r, c.a0));
+                const m = fn((0, geom_ts_1.arcPoint)(c.c, c.r, c.a0 + c.sweep / 2));
+                const end = fn((0, geom_ts_1.arcPoint)(c.c, c.r, c.a0 + c.sweep));
+                const built = (0, geom_ts_1.arcThrough)(s, m, end);
+                if (!built) {
+                    c.c = fn(c.c);
+                    c.r *= sc;
+                    return c;
+                }
+                c.c = built.c;
+                c.r = built.r;
+                c.a0 = built.a0;
+                c.sweep = built.sweep;
+                return c;
+            }
+            case "polyline":
+                c.pts = c.pts.map((p) => {
+                    const q = fn(p);
+                    const b = p.b ? (opt.mirror ? -p.b : p.b) : undefined;
+                    return b ? { ...q, b } : q;
+                });
+                c.width *= sc;
+                return c;
+            case "spline":
+                c.pts = c.pts.map(fn);
+                return c;
+            case "ellipse": {
+                const C = fn(c.c);
+                const major = fn((0, math_ts_1.add)(c.c, { x: c.mx, y: c.my }));
+                const v = (0, math_ts_1.sub)(major, C);
+                c.c = C;
+                c.mx = v.x;
+                c.my = v.y;
+                return c;
+            }
+            case "xline":
+            case "ray":
+                c.a = fn(c.a);
+                c.b = fn(c.b);
+                return c;
+            case "hatch":
+                c.loops = c.loops.map((loop) => {
+                    if ("circle" in loop)
+                        return { circle: { c: fn(loop.circle.c), r: loop.circle.r * sc } };
+                    return {
+                        closed: loop.closed,
+                        pts: loop.pts.map((p) => {
+                            const q = fn(p);
+                            return p.b ? { ...q, b: opt.mirror ? -p.b : p.b } : q;
+                        }),
+                    };
+                });
+                return c;
+            case "insert": {
+                c.p = fn(c.p);
+                c.sx *= opt.mirror ? -sc : sc;
+                c.sy *= sc;
+                c.rot += opt.rot;
+                return c;
+            }
+            case "dim":
+                c.dim = mapDim(c.dim, fn, sc);
+                return c;
+            default:
+                return c;
+        }
+    }
+    function mapDim(d, fn, sc) {
+        if (d.kind === "linear")
+            return { ...d, p1: fn(d.p1), p2: fn(d.p2), loc: fn(d.loc) };
+        if (d.kind === "radial")
+            return { ...d, c: fn(d.c), r: d.r * sc };
+        return { ...d, c: fn(d.c), r: d.r * sc };
+    }
+    function translateEnt(e, d) {
+        if ((0, math_ts_1.len)(d) < 1e-15)
+            return cloneEnt(e);
+        return mapEnt(e, (p) => (0, math_ts_1.add)(p, d), { scale: 1, mirror: false, uniform: true, rot: 0 });
+    }
+    function rotateEnt(e, base, ang) {
+        return mapEnt(e, (p) => (0, math_ts_1.add)(base, (0, math_ts_1.rot)((0, math_ts_1.sub)(p, base), ang)), {
+            scale: 1,
+            mirror: false,
+            uniform: true,
+            rot: ang,
+        });
+    }
+    function scaleEnt(e, base, f) {
+        const af = Math.abs(f);
+        let out = mapEnt(e, (p) => (0, math_ts_1.add)(base, (0, math_ts_1.mul)((0, math_ts_1.sub)(p, base), af)), {
+            scale: af,
+            mirror: false,
+            uniform: true,
+            rot: 0,
+        });
+        if (f < 0)
+            out = rotateEnt(out, base, Math.PI);
+        return out;
+    }
+    function mirrorEnt(e, a, b) {
+        const out = mapEnt(e, (p) => (0, geom_ts_1.mirrorPoint)(p, a, b), {
+            scale: 1,
+            mirror: true,
+            uniform: true,
+            rot: 0,
+        });
+        if (out.type === "text" || out.type === "insert") {
+            const dir = (0, geom_ts_1.mirrorVector)({ x: Math.cos(e.type === "text" ? e.rot : e.rot), y: Math.sin(e.type === "text" ? e.rot : e.type === "insert" ? e.rot : 0) }, a, b);
+            const ang = Math.atan2(dir.y, dir.x);
+            if (out.type === "text")
+                out.rot = ang;
+            if (out.type === "insert")
+                out.rot = ang;
+        }
+        return out;
+    }
+    function entityBBox(e, ctx) {
+        switch (e.type) {
+            case "line":
+                return (0, math_ts_1.boxFromCorners)(e.a, e.b);
+            case "point":
+                return (0, math_ts_1.expandBox)((0, math_ts_1.boxFromCorners)(e.p, e.p), 0.5);
+            case "circle":
+                return { minx: e.c.x - e.r, miny: e.c.y - e.r, maxx: e.c.x + e.r, maxy: e.c.y + e.r };
+            case "donut":
+                return { minx: e.c.x - e.or, miny: e.c.y - e.or, maxx: e.c.x + e.or, maxy: e.c.y + e.or };
+            case "arc":
+                return (0, geom_ts_1.arcBox)(e.c, e.r, e.a0, e.sweep);
+            case "polyline": {
+                const pts = (0, geom_ts_1.tessellate)(e.pts, e.closed);
+                let b = math_ts_1.EMPTY;
+                for (const p of pts)
+                    b = unionPt(b, p, (e.width || 0) / 2);
+                return b;
+            }
+            case "spline": {
+                const pts = splineSamples(e.pts);
+                let b = math_ts_1.EMPTY;
+                for (const p of pts)
+                    b = unionPt(b, p, 0);
+                return b;
+            }
+            case "ellipse": {
+                let b = math_ts_1.EMPTY;
+                for (const p of ellipseSamples(e, 32))
+                    b = unionPt(b, p, 0);
+                return b;
+            }
+            case "text": {
+                const w = Math.max(e.h, e.text.length * e.h * 0.62);
+                const corners = [
+                    { x: 0, y: 0 },
+                    { x: e.align === "center" ? -w / 2 : e.align === "right" ? -w : 0, y: 0 },
+                ];
+                const x0 = e.align === "center" ? -w / 2 : e.align === "right" ? -w : 0;
+                const local = [
+                    { x: x0, y: 0 },
+                    { x: x0 + w, y: 0 },
+                    { x: x0 + w, y: e.h },
+                    { x: x0, y: e.h },
+                ];
+                let b = math_ts_1.EMPTY;
+                for (const p of local) {
+                    const r = (0, math_ts_1.rot)(p, e.rot);
+                    b = unionPt(b, (0, math_ts_1.add)(e.p, r), 0);
+                }
+                void corners;
+                return b;
+            }
+            case "xline":
+            case "ray":
+                return { minx: -1e9, miny: -1e9, maxx: 1e9, maxy: 1e9 };
+            case "hatch": {
+                let b = math_ts_1.EMPTY;
+                for (const loop of e.loops) {
+                    if ("circle" in loop) {
+                        const c = loop.circle;
+                        b = (0, math_ts_1.boxUnion)(b, { minx: c.c.x - c.r, miny: c.c.y - c.r, maxx: c.c.x + c.r, maxy: c.c.y + c.r });
+                    }
+                    else {
+                        for (const p of (0, geom_ts_1.tessellate)(loop.pts, loop.closed))
+                            b = unionPt(b, p, 0);
+                    }
+                }
+                return b;
+            }
+            case "insert": {
+                const block = ctx.blocks.get(e.name.toLowerCase());
+                if (!block)
+                    return (0, math_ts_1.expandBox)((0, math_ts_1.boxFromCorners)(e.p, e.p), 1);
+                let b = math_ts_1.EMPTY;
+                for (const child of placedInsert(e, block))
+                    b = (0, math_ts_1.boxUnion)(b, entityBBox(child, ctx));
+                return b;
+            }
+            case "dim": {
+                let b = math_ts_1.EMPTY;
+                for (const p of dimPoints(e.dim))
+                    b = unionPt(b, p, 0);
+                return b;
+            }
+            default:
+                return math_ts_1.EMPTY;
+        }
+    }
+    function unionPt(b, p, pad) {
+        if ((0, math_ts_1.boxEmpty)(b))
+            return { minx: p.x - pad, miny: p.y - pad, maxx: p.x + pad, maxy: p.y + pad };
+        return {
+            minx: Math.min(b.minx, p.x - pad),
+            miny: Math.min(b.miny, p.y - pad),
+            maxx: Math.max(b.maxx, p.x + pad),
+            maxy: Math.max(b.maxy, p.y + pad),
+        };
+    }
+    function catmull(pts, samplesPer = 12) {
+        if (pts.length < 2)
+            return pts.map((p) => ({ x: p.x, y: p.y }));
+        if (pts.length === 2)
+            return [pts[0], pts[1]];
+        const out = [];
+        for (let i = 0; i < pts.length - 1; i++) {
+            const p0 = pts[Math.max(0, i - 1)];
+            const p1 = pts[i];
+            const p2 = pts[i + 1];
+            const p3 = pts[Math.min(pts.length - 1, i + 2)];
+            const n = i === pts.length - 2 ? samplesPer : samplesPer - 0;
+            for (let s = 0; s < (i === pts.length - 2 ? samplesPer + 1 : samplesPer); s++) {
+                const t = s / samplesPer;
+                out.push(catmullPoint(p0, p1, p2, p3, t));
+                void n;
+            }
+        }
+        return out;
+    }
+    function catmullPoint(p0, p1, p2, p3, t) {
+        const t2 = t * t;
+        const t3 = t2 * t;
+        return {
+            x: 0.5 * (2 * p1.x + (-p0.x + p2.x) * t + (2 * p0.y - 5 * p1.x + 4 * p2.x - p3.x) * t2 + (-p0.x + 3 * p1.x - 3 * p2.x + p3.x) * t3),
+            y: 0.5 * (2 * p1.y + (-p0.y + p2.y) * t + (2 * p0.y - 5 * p1.y + 4 * p2.y - p3.y) * t2 + (-p0.y + 3 * p1.y - 3 * p2.y + p3.y) * t3),
+        };
+    }
+    function splineSamples(pts) {
+        return catmull(pts, 10);
+    }
+    function ellipsePoint(e, t) {
+        const maj = { x: e.mx, y: e.my };
+        const L = (0, math_ts_1.len)(maj) || 1;
+        const ux = maj.x / L;
+        const uy = maj.y / L;
+        const minor = L * e.ratio;
+        const a = e.a0 + e.sweep * t;
+        return {
+            x: e.c.x + Math.cos(a) * maj.x - Math.sin(a) * uy * minor,
+            y: e.c.y + Math.cos(a) * maj.y + Math.sin(a) * ux * minor,
+        };
+    }
+    function ellipseSamples(e, n = 48) {
+        const steps = Math.max(8, Math.ceil((n * e.sweep) / math_ts_1.TAU));
+        const out = [];
+        for (let i = 0; i <= steps; i++)
+            out.push(ellipsePoint(e, i / steps));
+        return out;
+    }
+    function curvesOf(e, ctx) {
+        switch (e.type) {
+            case "line":
+                return [{ k: "line", a: e.a, b: e.b }];
+            case "xline": {
+                const d = (0, math_ts_1.norm)((0, math_ts_1.sub)(e.b, e.a));
+                return (0, math_ts_1.len)(d) < 0.5 ? [] : [{ k: "xline", p: e.a, d }];
+            }
+            case "ray": {
+                const d = (0, math_ts_1.norm)((0, math_ts_1.sub)(e.b, e.a));
+                return (0, math_ts_1.len)(d) < 0.5 ? [] : [{ k: "ray", p: e.a, d }];
+            }
+            case "circle":
+                return [{ k: "circle", c: e.c, r: e.r }];
+            case "donut":
+                return [
+                    { k: "circle", c: e.c, r: e.or },
+                    { k: "circle", c: e.c, r: e.ir },
+                ];
+            case "arc":
+                return [{ k: "arc", c: e.c, r: e.r, a0: e.a0, sweep: e.sweep }];
+            case "polyline":
+                return (0, geom_ts_1.polyCurves)(e.pts, e.closed);
+            case "spline": {
+                const s = splineSamples(e.pts);
+                const curves = [];
+                for (let i = 0; i < s.length - 1; i++)
+                    curves.push({ k: "line", a: s[i], b: s[i + 1] });
+                return curves;
+            }
+            case "ellipse": {
+                const s = ellipseSamples(e, 36);
+                const curves = [];
+                for (let i = 0; i < s.length - 1; i++)
+                    curves.push({ k: "line", a: s[i], b: s[i + 1] });
+                return curves;
+            }
+            case "insert": {
+                const block = ctx.blocks.get(e.name.toLowerCase());
+                if (!block)
+                    return [];
+                return placedInsert(e, block).flatMap((c) => curvesOf(c, ctx));
+            }
+            case "dim":
+                return explodeDim(e).flatMap((c) => (c.type === "line" ? curvesOf(c, ctx) : []));
+            case "hatch": {
+                const curves = [];
+                for (const loop of e.loops) {
+                    if ("circle" in loop)
+                        curves.push({ k: "circle", c: loop.circle.c, r: loop.circle.r });
+                    else
+                        curves.push(...(0, geom_ts_1.polyCurves)(loop.pts, loop.closed));
+                }
+                return curves;
+            }
+            default:
+                return [];
+        }
+    }
+    function hitDist(e, p, ctx) {
+        if (e.type === "text") {
+            const b = entityBBox(e, ctx);
+            if ((0, math_ts_1.pointInBox)(p, b))
+                return 0;
+            return Math.min((0, math_ts_1.dist)(p, { x: b.minx, y: b.miny }), (0, math_ts_1.dist)(p, { x: b.maxx, y: b.maxy }));
+        }
+        if (e.type === "point")
+            return (0, math_ts_1.dist)(p, e.p);
+        if (e.type === "hatch") {
+            if (hatchContains(e, p))
+                return 0;
+        }
+        let best = Infinity;
+        for (const c of curvesOf(e, ctx)) {
+            const q = (0, geom_ts_1.closestOnCurve)(p, c);
+            if (q && q.d < best)
+                best = q.d;
+        }
+        return best;
+    }
+    function hatchContains(e, p) {
+        let inside = false;
+        for (const loop of e.loops) {
+            if ("circle" in loop) {
+                if ((0, math_ts_1.dist)(p, loop.circle.c) <= loop.circle.r)
+                    inside = !inside;
+            }
+            else if (pointInLoop(p, loop.pts, loop.closed))
+                inside = !inside;
+        }
+        return inside;
+    }
+    function pointInLoop(p, pts, closed) {
+        if (!closed || pts.length < 3)
+            return false;
+        return pointInPolyFast(p, (0, geom_ts_1.tessellate)(pts, true, Math.PI / 12));
+    }
+    function pointInPolyFast(p, poly) {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const a = poly[i];
+            const b = poly[j];
+            if (a.y > p.y !== b.y > p.y) {
+                const x = ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y || 1e-18) + a.x;
+                if (p.x < x)
+                    inside = !inside;
+            }
+        }
+        return inside;
+    }
+    function hitsRect(e, box, ctx, mode) {
+        if (e.type === "xline" || e.type === "ray") {
+            if (mode === "window")
+                return false;
+            return curvesOf(e, ctx).some((c) => {
+                if (c.k !== "xline" && c.k !== "ray")
+                    return false;
+                const far = (0, math_ts_1.add)(c.p, (0, math_ts_1.mul)(c.d, 1e6));
+                const back = c.k === "xline" ? (0, math_ts_1.add)(c.p, (0, math_ts_1.mul)(c.d, -1e6)) : c.p;
+                return (0, geom_ts_1.segHitsBox)(back, far, box);
+            });
+        }
+        const b = entityBBox(e, ctx);
+        if ((0, math_ts_1.boxEmpty)(b) || !(0, math_ts_1.boxIntersects)(b, box))
+            return false;
+        if (mode === "window")
+            return (0, math_ts_1.boxInside)(b, box);
+        if ((0, math_ts_1.boxInside)(b, box))
+            return true;
+        return curvesOf(e, ctx).some((c) => {
+            if (c.k === "line")
+                return (0, geom_ts_1.segHitsBox)(c.a, c.b, box);
+            if (c.k === "circle" || c.k === "arc") {
+                const steps = c.k === "circle" ? 24 : Math.max(4, Math.ceil((16 * c.sweep) / math_ts_1.TAU));
+                for (let i = 0; i < steps; i++) {
+                    const a0 = c.k === "circle" ? (i * math_ts_1.TAU) / steps : c.a0 + (c.sweep * i) / steps;
+                    const a1 = c.k === "circle" ? ((i + 1) * math_ts_1.TAU) / steps : c.a0 + (c.sweep * (i + 1)) / steps;
+                    if ((0, geom_ts_1.segHitsBox)((0, geom_ts_1.arcPoint)(c.c, c.r, a0), (0, geom_ts_1.arcPoint)(c.c, c.r, a1), box))
+                        return true;
+                }
+                return false;
+            }
+            return false;
+        });
+    }
+    function gripsOf(e) {
+        const g = (p, kind, index) => ({ p, kind, entId: e.id, index });
+        switch (e.type) {
+            case "line":
+                return [g(e.a, "end", 0), g(e.b, "end", 1), g({ x: (e.a.x + e.b.x) / 2, y: (e.a.y + e.b.y) / 2 }, "mid", 2)];
+            case "circle":
+            case "donut": {
+                const r = e.type === "circle" ? e.r : e.or;
+                return [
+                    g(e.c, "cen", 0),
+                    g((0, geom_ts_1.arcPoint)(e.c, r, 0), "quad", 1),
+                    g((0, geom_ts_1.arcPoint)(e.c, r, Math.PI / 2), "quad", 2),
+                    g((0, geom_ts_1.arcPoint)(e.c, r, Math.PI), "quad", 3),
+                    g((0, geom_ts_1.arcPoint)(e.c, r, -Math.PI / 2), "quad", 4),
+                ];
+            }
+            case "arc":
+                return [
+                    g(e.c, "cen", 0),
+                    g((0, geom_ts_1.arcPoint)(e.c, e.r, e.a0), "end", 1),
+                    g((0, geom_ts_1.arcPoint)(e.c, e.r, e.a0 + e.sweep), "end", 2),
+                    g((0, geom_ts_1.arcPoint)(e.c, e.r, e.a0 + e.sweep / 2), "mid", 3),
+                ];
+            case "polyline": {
+                const gs = e.pts.map((p, i) => g(p, "vertex", i));
+                const n = e.pts.length;
+                const segs = e.closed ? n : n - 1;
+                for (let i = 0; i < segs; i++) {
+                    const p = e.pts[i];
+                    const q = e.pts[(i + 1) % n];
+                    const arc = p.b ? (0, geom_ts_1.bulgeArc)(p, q, p.b) : null;
+                    const mid = arc ? (0, geom_ts_1.arcPoint)(arc.c, arc.r, arc.a0 + arc.sweep / 2) : { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 };
+                    gs.push(g(mid, "mid", 1000 + i));
+                }
+                return gs;
+            }
+            case "spline":
+                return e.pts.map((p, i) => g(p, "vertex", i));
+            case "ellipse":
+                return [g(e.c, "cen", 0), g((0, math_ts_1.add)(e.c, { x: e.mx, y: e.my }), "quad", 1)];
+            case "point":
+            case "text":
+            case "insert":
+                return [g(e.type === "point" ? e.p : e.type === "text" ? e.p : e.p, "ins", 0)];
+            case "xline":
+            case "ray":
+                return [g(e.a, "end", 0), g(e.b, "end", 1)];
+            case "dim":
+                return dimPoints(e.dim).map((p, i) => g(p, "vertex", i));
+            case "hatch": {
+                const gs = [];
+                e.loops.forEach((loop, li) => {
+                    if ("circle" in loop)
+                        gs.push(g(loop.circle.c, "cen", li));
+                    else
+                        loop.pts.forEach((p, i) => gs.push(g(p, "vertex", li * 1000 + i)));
+                });
+                return gs;
+            }
+            default:
+                return [];
+        }
+    }
+    function applyGrip(e, grip, to) {
+        const c = cloneEnt(e);
+        const delta = (0, math_ts_1.sub)(to, grip.p);
+        switch (c.type) {
+            case "line":
+                if (grip.index === 0)
+                    c.a = to;
+                else if (grip.index === 1)
+                    c.b = to;
+                else
+                    return translateEnt(c, delta);
+                return c;
+            case "circle":
+                if (grip.kind === "cen")
+                    c.c = to;
+                else
+                    c.r = Math.max(1e-6, (0, math_ts_1.dist)(c.c, to));
+                return c;
+            case "donut":
+                if (grip.kind === "cen")
+                    c.c = to;
+                else {
+                    const d = (0, math_ts_1.dist)(c.c, to);
+                    const thick = Math.max(0, c.or - c.ir);
+                    c.or = Math.max(thick + 1e-4, d);
+                    c.ir = c.or - thick;
+                }
+                return c;
+            case "arc":
+                if (grip.index === 0)
+                    return translateEnt(c, delta);
+                if (grip.index === 1) {
+                    c.a0 = Math.atan2(to.y - c.c.y, to.x - c.c.x);
+                    return c;
+                }
+                if (grip.index === 2) {
+                    const a = Math.atan2(to.y - c.c.y, to.x - c.c.x);
+                    c.sweep = (0, math_ts_1.ccwSweep)(c.a0, a);
+                    return c;
+                }
+                return translateEnt(c, delta);
+            case "polyline":
+                if (grip.index >= 1000) {
+                    const i = grip.index - 1000;
+                    const n = c.pts.length;
+                    const j = (i + 1) % n;
+                    c.pts[i] = { ...c.pts[i], x: c.pts[i].x + delta.x, y: c.pts[i].y + delta.y };
+                    c.pts[j] = { ...c.pts[j], x: c.pts[j].x + delta.x, y: c.pts[j].y + delta.y };
+                    return c;
+                }
+                if (c.pts[grip.index])
+                    c.pts[grip.index] = { ...c.pts[grip.index], x: to.x, y: to.y };
+                return c;
+            case "spline":
+                if (c.pts[grip.index])
+                    c.pts[grip.index] = { x: to.x, y: to.y };
+                return c;
+            case "ellipse":
+                if (grip.kind === "cen")
+                    c.c = to;
+                else {
+                    c.mx = to.x - c.c.x;
+                    c.my = to.y - c.c.y;
+                }
+                return c;
+            case "point":
+                c.p = to;
+                return c;
+            case "text":
+            case "insert":
+                c.p = to;
+                return c;
+            case "xline":
+            case "ray":
+                if (grip.index === 0) {
+                    const d = (0, math_ts_1.sub)(c.b, c.a);
+                    c.a = to;
+                    c.b = (0, math_ts_1.add)(to, d);
+                }
+                else
+                    c.b = to;
+                return c;
+            default:
+                return translateEnt(c, delta);
+        }
+    }
+    function stretchEnt(e, box, delta) {
+        const inside = (p) => (0, math_ts_1.pointInBox)(p, box);
+        if ((0, math_ts_1.len)(delta) < 1e-15)
+            return null;
+        switch (e.type) {
+            case "line": {
+                const a = inside(e.a);
+                const b = inside(e.b);
+                if (!a && !b)
+                    return null;
+                const c = cloneEnt(e);
+                if (a)
+                    c.a = (0, math_ts_1.add)(c.a, delta);
+                if (b)
+                    c.b = (0, math_ts_1.add)(c.b, delta);
+                return c;
+            }
+            case "polyline":
+            case "spline": {
+                const c = cloneEnt(e);
+                let moved = false;
+                c.pts = c.pts.map((p) => {
+                    if (!inside(p))
+                        return p;
+                    moved = true;
+                    return { ...p, x: p.x + delta.x, y: p.y + delta.y };
+                });
+                return moved ? c : null;
+            }
+            case "circle":
+            case "donut":
+            case "ellipse":
+            case "arc":
+                if (!inside(e.c))
+                    return null;
+                return translateEnt(e, delta);
+            case "point":
+            case "text":
+            case "insert":
+                if (!inside(e.p))
+                    return null;
+                return translateEnt(e, delta);
+            case "xline":
+            case "ray": {
+                const c = cloneEnt(e);
+                let moved = false;
+                if (inside(c.a)) {
+                    c.a = (0, math_ts_1.add)(c.a, delta);
+                    c.b = (0, math_ts_1.add)(c.b, delta);
+                    moved = true;
+                }
+                return moved ? c : null;
+            }
+            case "dim": {
+                const d = cloneEnt(e);
+                let moved = false;
+                const mov = (p) => {
+                    if (!inside(p))
+                        return p;
+                    moved = true;
+                    return (0, math_ts_1.add)(p, delta);
+                };
+                if (d.dim.kind === "linear")
+                    d.dim = { ...d.dim, p1: mov(d.dim.p1), p2: mov(d.dim.p2), loc: mov(d.dim.loc) };
+                else if (inside(d.dim.c))
+                    return translateEnt(e, delta);
+                return moved ? d : null;
+            }
+            case "hatch": {
+                const c = cloneEnt(e);
+                let moved = false;
+                c.loops = c.loops.map((loop) => {
+                    if ("circle" in loop) {
+                        if (!inside(loop.circle.c))
+                            return loop;
+                        moved = true;
+                        return { circle: { c: (0, math_ts_1.add)(loop.circle.c, delta), r: loop.circle.r } };
+                    }
+                    return {
+                        closed: loop.closed,
+                        pts: loop.pts.map((p) => {
+                            if (!inside(p))
+                                return p;
+                            moved = true;
+                            return { ...p, x: p.x + delta.x, y: p.y + delta.y };
+                        }),
+                    };
+                });
+                return moved ? c : null;
+            }
+            default:
+                return null;
+        }
+    }
+    function styleOf(src) {
+        return { layer: src.layer, color: src.color, lt: src.lt, lw: src.lw };
+    }
+    function explodeEnt(e, ctx) {
+        const st = styleOf(e);
+        switch (e.type) {
+            case "polyline": {
+                const curves = (0, geom_ts_1.polyCurves)(e.pts, e.closed);
+                if (!curves.length)
+                    return null;
+                return curves.map((c) => {
+                    if (c.k === "line")
+                        return { ...st, id: uid(), type: "line", a: c.a, b: c.b };
+                    return { ...st, id: uid(), type: "arc", c: c.c, r: c.r, a0: c.a0, sweep: c.sweep };
+                });
+            }
+            case "spline": {
+                const s = splineSamples(e.pts);
+                return [{ ...st, id: uid(), type: "polyline", pts: s.map((p) => ({ ...p })), closed: false, width: 0 }];
+            }
+            case "donut": {
+                const r = (e.ir + e.or) / 2;
+                const w = Math.max(0, e.or - e.ir);
+                const p1 = { x: e.c.x - r, y: e.c.y, b: 1 };
+                const p2 = { x: e.c.x + r, y: e.c.y, b: 1 };
+                return [{ ...st, id: uid(), type: "polyline", pts: [p1, p2], closed: true, width: w }];
+            }
+            case "insert": {
+                const block = ctx.blocks.get(e.name.toLowerCase());
+                if (!block)
+                    return null;
+                return placedInsert(e, block).map(retag);
+            }
+            case "hatch": {
+                const out = [];
+                for (const loop of e.loops) {
+                    if ("circle" in loop)
+                        out.push({ ...st, id: uid(), type: "circle", c: loop.circle.c, r: loop.circle.r });
+                    else
+                        out.push({ ...st, id: uid(), type: "polyline", pts: loop.pts.map((p) => ({ ...p })), closed: loop.closed, width: 0 });
+                }
+                return out;
+            }
+            case "dim":
+                return explodeDim(e).map(retag);
+            case "ellipse": {
+                const s = ellipseSamples(e, 48);
+                return [{ ...st, id: uid(), type: "polyline", pts: s, closed: e.sweep >= math_ts_1.TAU - 1e-3, width: 0 }];
+            }
+            default:
+                return null;
+        }
+    }
+    function dimPoints(d) {
+        if (d.kind === "linear")
+            return [d.p1, d.p2, d.loc];
+        if (d.kind === "radial")
+            return [d.c, (0, geom_ts_1.arcPoint)(d.c, d.r, d.ang)];
+        return [d.c, (0, geom_ts_1.arcPoint)(d.c, d.r, d.a0), (0, geom_ts_1.arcPoint)(d.c, d.r, d.a1)];
+    }
+    function explodeDim(e) {
+        const st = { layer: e.layer, color: e.color, lt: "continuous", lw: e.lw };
+        const text = (p, str, h, rot = 0) => ({
+            ...st,
+            id: uid(),
+            type: "text",
+            p,
+            h,
+            rot,
+            text: str,
+            align: "center",
+        });
+        const line = (a, b) => ({ ...st, id: uid(), type: "line", a, b });
+        const h = 2.5;
+        if (e.dim.kind === "radial") {
+            const tip = (0, geom_ts_1.arcPoint)(e.dim.c, e.dim.r, e.dim.ang);
+            const label = `${e.dim.dia ? "Ø" : "R"}${(e.dim.dia ? e.dim.r * 2 : e.dim.r).toFixed(2)}`;
+            return [line(e.dim.c, tip), text((0, math_ts_1.add)(tip, { x: h, y: h }), label, h)];
+        }
+        if (e.dim.kind === "angular") {
+            const samples = [];
+            const steps = 12;
+            let prev = (0, geom_ts_1.arcPoint)(e.dim.c, e.dim.r, e.dim.a0);
+            const sweep = (0, math_ts_1.ccwSweep)(e.dim.a0, e.dim.a1);
+            for (let i = 1; i <= steps; i++) {
+                const q = (0, geom_ts_1.arcPoint)(e.dim.c, e.dim.r, e.dim.a0 + (sweep * i) / steps);
+                samples.push(line(prev, q));
+                prev = q;
+            }
+            const mid = (0, geom_ts_1.arcPoint)(e.dim.c, e.dim.r, e.dim.a0 + sweep / 2);
+            const deg = (sweep * 180) / Math.PI;
+            samples.push(text(mid, `${deg.toFixed(1)}°`, h));
+            return samples;
+        }
+        const built = linearDimGeom(e.dim, h);
+        const ents = [
+            line(built.ext1[0], built.ext1[1]),
+            line(built.ext2[0], built.ext2[1]),
+            line(built.dim[0], built.dim[1]),
+            text(built.textPt, built.label, h, built.textRot),
+        ];
+        return ents;
+    }
+    function linearDimGeom(d, textH) {
+        const gap = textH * 0.28;
+        const over = textH * 0.35;
+        let u;
+        let n;
+        let q1;
+        let q2;
+        let measure;
+        if (d.axis === "h") {
+            u = { x: Math.sign(d.p2.x - d.p1.x) || 1, y: 0 };
+            n = { x: 0, y: 1 };
+            q1 = { x: d.p1.x, y: d.loc.y };
+            q2 = { x: d.p2.x, y: d.loc.y };
+            measure = Math.abs(d.p2.x - d.p1.x);
+        }
+        else if (d.axis === "v") {
+            u = { x: 0, y: Math.sign(d.p2.y - d.p1.y) || 1 };
+            n = { x: 1, y: 0 };
+            q1 = { x: d.loc.x, y: d.p1.y };
+            q2 = { x: d.loc.x, y: d.p2.y };
+            measure = Math.abs(d.p2.y - d.p1.y);
+        }
+        else {
+            const dir = (0, math_ts_1.norm)((0, math_ts_1.sub)(d.p2, d.p1));
+            u = (0, math_ts_1.len)(dir) < 0.5 ? { x: 1, y: 0 } : dir;
+            n = { x: -u.y, y: u.x };
+            const off = (d.loc.x - d.p1.x) * n.x + (d.loc.y - d.p1.y) * n.y;
+            q1 = (0, math_ts_1.add)(d.p1, (0, math_ts_1.mul)(n, off));
+            q2 = (0, math_ts_1.add)(d.p2, (0, math_ts_1.mul)(n, off));
+            measure = (0, math_ts_1.dist)(d.p1, d.p2);
+            if (off < 0)
+                n = (0, math_ts_1.mul)(n, -1);
+        }
+        const side = (p, q) => {
+            const nd = (0, math_ts_1.norm)((0, math_ts_1.sub)(q, p));
+            return (0, math_ts_1.len)(nd) < 0.5 ? n : nd;
+        };
+        const s1 = side(d.p1, q1);
+        const s2 = side(d.p2, q2);
+        const ext1 = [(0, math_ts_1.add)(d.p1, (0, math_ts_1.mul)(s1, gap)), (0, math_ts_1.add)(q1, (0, math_ts_1.mul)(s1, over))];
+        const ext2 = [(0, math_ts_1.add)(d.p2, (0, math_ts_1.mul)(s2, gap)), (0, math_ts_1.add)(q2, (0, math_ts_1.mul)(s2, over))];
+        const mid = { x: (q1.x + q2.x) / 2, y: (q1.y + q2.y) / 2 };
+        const textRot = d.axis === "v" ? Math.PI / 2 : d.axis === "h" ? 0 : (0, math_ts_1.angOf)(u);
+        const lift = (0, math_ts_1.mul)(n, textH * 0.55);
+        return {
+            ext1,
+            ext2,
+            dim: [q1, q2],
+            textPt: (0, math_ts_1.add)(mid, lift),
+            textRot,
+            label: measure.toFixed(2),
+            arrows: [
+                { tip: q1, dir: (0, math_ts_1.norm)((0, math_ts_1.sub)(q1, q2)) },
+                { tip: q2, dir: (0, math_ts_1.norm)((0, math_ts_1.sub)(q2, q1)) },
+            ],
+        };
+    }
+    function resolvedPaint(e, layers, color7) {
+        const layer = layerOf(layers, e.layer);
+        const aci = e.color === "bylayer" || e.color === "byblock" ? layer.color : e.color;
+        const lt = e.lt === "bylayer" || e.lt === "byblock" ? layer.lt : e.lt;
+        const lw = e.lw === "bylayer" || e.lw === "byblock" ? layer.lw : e.lw;
+        return { color: (0, aci_ts_1.aciHex)(aci, color7), lt, lw };
+    }
+    function visibleEnt(e, layers) {
+        const layer = layerOf(layers, e.layer);
+        return layer.on && !layer.frozen;
+    }
+    function editableEnt(e, layers) {
+        const layer = layerOf(layers, e.layer);
+        return layer.on && !layer.frozen && !layer.locked;
+    }
+    function snapEligible(e, layers) {
+        return visibleEnt(e, layers);
+    }
+    /** Replace a trimmed curve back into an entity, possibly splitting into several. */
+    function trimEntity(e, cuts, pick, ctx) {
+        const st = styleOf(e);
+        if (e.type === "line") {
+            const hits = cuts.flatMap((c) => (0, geom_ts_1.curveHits)({ k: "line", a: e.a, b: e.b }, c));
+            const parts = (0, geom_ts_1.trimParamLine)(e.a, e.b, hits, pick);
+            if (!parts)
+                return null;
+            return parts
+                .filter(([a, b]) => (0, math_ts_1.dist)(a, b) > 1e-8)
+                .map(([a, b]) => ({ ...st, id: uid(), type: "line", a, b }));
+        }
+        if (e.type === "circle" || e.type === "arc") {
+            const curve = e.type === "circle"
+                ? { k: "circle", c: e.c, r: e.r }
+                : { k: "arc", c: e.c, r: e.r, a0: e.a0, sweep: e.sweep };
+            const hits = cuts.flatMap((c) => (0, geom_ts_1.curveHits)(curve, c));
+            if (hits.length === 0 && e.type === "circle")
+                return null;
+            const angs = hits.map((h) => Math.atan2(h.y - e.c.y, h.x - e.c.x));
+            if (e.type === "arc") {
+                const rel = angs
+                    .map((a) => ({ a, t: (0, math_ts_1.ccwSweep)(e.a0, a) }))
+                    .filter((x) => x.t > 1e-4 && x.t < e.sweep - 1e-4)
+                    .sort((p, q) => p.t - q.t);
+                if (!rel.length)
+                    return null;
+                const pickA = Math.atan2(pick.y - e.c.y, pick.x - e.c.x);
+                const tp = Math.min(e.sweep, Math.max(0, (0, math_ts_1.ccwSweep)(e.a0, pickA)));
+                const bounds = [0, ...rel.map((r) => r.t), e.sweep];
+                let span = 0;
+                for (let i = 0; i < bounds.length - 1; i++) {
+                    if (tp >= bounds[i] - 1e-4 && tp <= bounds[i + 1] + 1e-4)
+                        span = i;
+                }
+                const out = [];
+                for (let i = 0; i < bounds.length - 1; i++) {
+                    if (i === span)
+                        continue;
+                    const sweep = bounds[i + 1] - bounds[i];
+                    if (sweep < 1e-4)
+                        continue;
+                    out.push({
+                        ...st,
+                        id: uid(),
+                        type: "arc",
+                        c: e.c,
+                        r: e.r,
+                        a0: e.a0 + bounds[i],
+                        sweep,
+                    });
+                }
+                return out;
+            }
+            if (angs.length < 1)
+                return null;
+            angs.sort((a, b) => a - b);
+            const uniq = [];
+            for (const a of angs) {
+                if (!uniq.length || Math.abs(normMinus(a, uniq[uniq.length - 1])) > 1e-3)
+                    uniq.push(a);
+            }
+            if (!uniq.length)
+                return null;
+            const pickA = Math.atan2(pick.y - e.c.y, pick.x - e.c.x);
+            // Remove the CCW span from the hit before the pick to the hit after.
+            let prev = uniq[uniq.length - 1];
+            let next = uniq[0];
+            for (let i = 0; i < uniq.length; i++) {
+                const a0 = uniq[i];
+                const a1 = uniq[(i + 1) % uniq.length];
+                if ((0, math_ts_1.angInSweep)(pickA, a0, (0, math_ts_1.ccwSweep)(a0, a1))) {
+                    prev = a0;
+                    next = a1;
+                    break;
+                }
+            }
+            const sweep = (0, math_ts_1.ccwSweep)(next, prev);
+            if (sweep < 1e-3 || sweep > math_ts_1.TAU - 1e-3)
+                return [];
+            return [{ ...st, id: uid(), type: "arc", c: e.c, r: e.r, a0: next, sweep }];
+        }
+        if (e.type === "polyline") {
+            const n = e.pts.length;
+            const segs = e.closed ? n : n - 1;
+            let bestI = -1;
+            let bestD = Infinity;
+            for (let i = 0; i < segs; i++) {
+                const curves = (0, geom_ts_1.polyCurves)([e.pts[i], e.pts[(i + 1) % n]], false);
+                for (const c of curves) {
+                    const q = (0, geom_ts_1.closestOnCurve)(pick, c);
+                    if (q && q.d < bestD) {
+                        bestD = q.d;
+                        bestI = i;
+                    }
+                }
+            }
+            if (bestI < 0)
+                return null;
+            const p = e.pts[bestI];
+            const q = e.pts[(bestI + 1) % n];
+            const arc = p.b ? (0, geom_ts_1.bulgeArc)(p, q, p.b) : null;
+            if (arc) {
+                const asEnt = {
+                    ...st,
+                    id: e.id,
+                    type: "arc",
+                    c: arc.c,
+                    r: arc.r,
+                    a0: arc.sweep >= 0 ? arc.a0 : arc.a0 + arc.sweep,
+                    sweep: Math.abs(arc.sweep),
+                };
+                const trimmed = trimEntity(asEnt, cuts, pick, ctx);
+                if (!trimmed)
+                    return null;
+                return splicePoly(e, bestI, trimmed);
+            }
+            const hits = cuts.flatMap((c) => (0, geom_ts_1.curveHits)({ k: "line", a: p, b: q }, c));
+            const parts = (0, geom_ts_1.trimParamLine)(p, q, hits, pick);
+            if (!parts)
+                return null;
+            const lines = parts.map(([a, b]) => ({ ...st, id: uid(), type: "line", a, b }));
+            return splicePoly(e, bestI, lines);
+        }
+        return null;
+    }
+    function normMinus(a, b) {
+        return Math.atan2(Math.sin(a - b), Math.cos(a - b));
+    }
+    function splicePoly(e, seg, repl) {
+        const n = e.pts.length;
+        const st = styleOf(e);
+        const before = e.pts.slice(0, seg + 1);
+        const after = e.pts.slice(seg + 1);
+        // A trimmed segment becomes 0, 1, or 2 pieces. Rebuild up to two polylines.
+        if (repl.length === 0) {
+            const pts = [...before.slice(0, -1), ...after];
+            if (pts.length < 2)
+                return [];
+            return [{ ...st, id: uid(), type: "polyline", pts, closed: false, width: e.width }];
+        }
+        const toPts = (ent) => {
+            if (ent.type === "line")
+                return [ent.a, ent.b];
+            if (ent.type === "arc") {
+                const s = (0, geom_ts_1.arcPoint)(ent.c, ent.r, ent.a0);
+                const end = (0, geom_ts_1.arcPoint)(ent.c, ent.r, ent.a0 + ent.sweep);
+                const sweep = ent.sweep;
+                const bulge = Math.tan(sweep / 4);
+                return [{ ...s, b: bulge }, end];
+            }
+            return [];
+        };
+        if (repl.length === 1) {
+            const bits = toPts(repl[0]);
+            if (bits.length < 2)
+                return [e];
+            const pts = [...before.slice(0, -1), bits[0], bits[1], ...after.slice(1)];
+            // If the original was closed and we shortened one end, open it when the join breaks.
+            return [{ ...st, id: uid(), type: "polyline", pts, closed: e.closed && (0, math_ts_1.dist)(pts[0], pts[pts.length - 1]) < 1e-6, width: e.width }];
+        }
+        const A = toPts(repl[0]);
+        const B = toPts(repl[1]);
+        const out = [];
+        const left = [...before.slice(0, -1), ...(A[0] ? [A[0]] : []), ...(A[1] ? [A[1]] : [])];
+        const right = [...(B[0] ? [B[0]] : []), ...(B[1] ? [B[1]] : []), ...after.slice(1)];
+        if (left.length >= 2)
+            out.push({ ...st, id: uid(), type: "polyline", pts: left, closed: false, width: e.width });
+        if (right.length >= 2)
+            out.push({ ...st, id: uid(), type: "polyline", pts: right, closed: false, width: e.width });
+        void n;
+        return out;
+    }
+    function extendEntity(e, bounds, pick) {
+        if (e.type === "line") {
+            const hits = bounds.flatMap((c) => {
+                const endIsA = (0, math_ts_1.dist)(pick, e.a) <= (0, math_ts_1.dist)(pick, e.b);
+                const origin = endIsA ? e.a : e.b;
+                const other = endIsA ? e.b : e.a;
+                return (0, geom_ts_1.rayHits)(origin, (0, math_ts_1.sub)(origin, other), c);
+            });
+            const next = (0, geom_ts_1.extendLineTo)(e.a, e.b, pick, hits);
+            if (!next)
+                return null;
+            return { ...e, a: next[0], b: next[1] };
+        }
+        if (e.type === "arc") {
+            const s = (0, geom_ts_1.arcPoint)(e.c, e.r, e.a0);
+            const end = (0, geom_ts_1.arcPoint)(e.c, e.r, e.a0 + e.sweep);
+            const extendStart = (0, math_ts_1.dist)(pick, s) <= (0, math_ts_1.dist)(pick, end);
+            const dirSign = extendStart ? -1 : 1;
+            let best = null;
+            const originAng = extendStart ? e.a0 : e.a0 + e.sweep;
+            for (const c of bounds) {
+                for (const h of (0, geom_ts_1.curveHits)({ k: "circle", c: e.c, r: e.r }, c)) {
+                    const a = Math.atan2(h.y - e.c.y, h.x - e.c.x);
+                    // Travel outward: decreasing angle if extending start of a CCW arc.
+                    let delta = dirSign * ccwLike(originAng, a, dirSign);
+                    if (delta > 1e-3 && (best === null || delta < best))
+                        best = delta;
+                    void a;
+                }
+            }
+            if (best === null)
+                return null;
+            if (extendStart)
+                return { ...e, a0: e.a0 - best, sweep: e.sweep + best };
+            return { ...e, sweep: e.sweep + best };
+        }
+        if (e.type === "polyline" && !e.closed && e.pts.length >= 2) {
+            const n = e.pts.length;
+            const atStart = (0, math_ts_1.dist)(pick, e.pts[0]) <= (0, math_ts_1.dist)(pick, e.pts[n - 1]);
+            const a = atStart ? e.pts[0] : e.pts[n - 2];
+            const b = atStart ? e.pts[1] : e.pts[n - 1];
+            if (a.b)
+                return null;
+            const fake = { ...e, type: "line", a: atStart ? b : a, b: atStart ? a : b };
+            // extendLine uses the end closer to pick. Put pick near the free end.
+            const probe = atStart ? a : b;
+            const ext = extendEntity(fake, bounds, probe);
+            if (!ext || ext.type !== "line")
+                return null;
+            const c = cloneEnt(e);
+            if (atStart)
+                c.pts[0] = { ...c.pts[0], x: ext.a.x === b.x && ext.a.y === b.y ? ext.b.x : ext.a.x, y: ext.a.x === b.x && ext.a.y === b.y ? ext.b.y : ext.a.y };
+            else {
+                const moved = (0, math_ts_1.dist)(ext.b, b) > (0, math_ts_1.dist)(ext.a, b) ? ext.b : ext.a;
+                // The free end is the one that changed.
+                const changed = (0, math_ts_1.dist)(ext.a, probe) > 1e-6 ? ext.a : ext.b;
+                c.pts[n - 1] = { ...c.pts[n - 1], x: changed.x, y: changed.y };
+                void moved;
+            }
+            return c;
+        }
+        return null;
+    }
+    function ccwLike(from, to, dirSign) {
+        if (dirSign > 0)
+            return (0, math_ts_1.ccwSweep)(from, to);
+        return (0, math_ts_1.ccwSweep)(to, from);
+    }
+    function breakEntity(e, p1, p2) {
+        const st = styleOf(e);
+        if (e.type === "line") {
+            const t1 = Math.max(0, Math.min(1, projSafe(e.a, e.b, p1)));
+            const t2 = Math.max(0, Math.min(1, projSafe(e.a, e.b, p2)));
+            const lo = Math.min(t1, t2);
+            const hi = Math.max(t1, t2);
+            if (hi - lo < 1e-8) {
+                const q = lerpP(e.a, e.b, lo);
+                return [
+                    { ...st, id: uid(), type: "line", a: e.a, b: q },
+                    { ...st, id: uid(), type: "line", a: q, b: e.b },
+                ].filter((ln) => (0, math_ts_1.dist)(ln.a, ln.b) > 1e-8);
+            }
+            const A = lerpP(e.a, e.b, lo);
+            const B = lerpP(e.a, e.b, hi);
+            const out = [];
+            if (lo > 1e-5)
+                out.push({ ...st, id: uid(), type: "line", a: e.a, b: A });
+            if (hi < 1 - 1e-5)
+                out.push({ ...st, id: uid(), type: "line", a: B, b: e.b });
+            return out;
+        }
+        if (e.type === "circle" || e.type === "arc") {
+            const a = Math.atan2(p1.y - e.c.y, p1.x - e.c.x);
+            const b = Math.atan2(p2.y - e.c.y, p2.x - e.c.x);
+            if (e.type === "circle") {
+                const sweep = (0, math_ts_1.ccwSweep)(b, a);
+                return [{ ...st, id: uid(), type: "arc", c: e.c, r: e.r, a0: b, sweep }];
+            }
+            // Remove the portion of the arc between the two angles that lies on the arc.
+            const tA = (0, math_ts_1.ccwSweep)(e.a0, a);
+            const tB = (0, math_ts_1.ccwSweep)(e.a0, b);
+            if (tA > e.sweep + 1e-3 && tB > e.sweep + 1e-3)
+                return null;
+            const lo = Math.min(tA, tB);
+            const hi = Math.max(tA, tB);
+            const out = [];
+            if (lo > 1e-3)
+                out.push({ ...st, id: uid(), type: "arc", c: e.c, r: e.r, a0: e.a0, sweep: lo });
+            if (e.sweep - hi > 1e-3)
+                out.push({ ...st, id: uid(), type: "arc", c: e.c, r: e.r, a0: e.a0 + hi, sweep: e.sweep - hi });
+            return out;
+        }
+        return null;
+    }
+    function projSafe(a, b, p) {
+        const ab = (0, math_ts_1.sub)(b, a);
+        const l2 = ab.x * ab.x + ab.y * ab.y || 1e-18;
+        return ((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / l2;
+    }
+    function lerpP(a, b, t) {
+        return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+    }
+    function describeEnt(e) {
+        switch (e.type) {
+            case "line":
+                return `LINE  ${e.a.x.toFixed(4)},${e.a.y.toFixed(4)} → ${e.b.x.toFixed(4)},${e.b.y.toFixed(4)}  len ${(0, math_ts_1.dist)(e.a, e.b).toFixed(4)}`;
+            case "circle":
+                return `CIRCLE  c ${e.c.x.toFixed(4)},${e.c.y.toFixed(4)}  r ${e.r.toFixed(4)}`;
+            case "arc":
+                return `ARC  c ${e.c.x.toFixed(4)},${e.c.y.toFixed(4)}  r ${e.r.toFixed(4)}  sweep ${((e.sweep * 180) / Math.PI).toFixed(2)}°`;
+            case "polyline":
+                return `LWPOLYLINE  ${e.pts.length} verts  ${e.closed ? "closed" : "open"}`;
+            case "text":
+                return `TEXT  "${e.text}"  h ${e.h.toFixed(3)}`;
+            case "spline":
+                return `SPLINE  ${e.pts.length} fit points`;
+            case "ellipse":
+                return `ELLIPSE  c ${e.c.x.toFixed(4)},${e.c.y.toFixed(4)}`;
+            case "point":
+                return `POINT  ${e.p.x.toFixed(4)},${e.p.y.toFixed(4)}`;
+            case "insert":
+                return `INSERT  ${e.name}  @ ${e.p.x.toFixed(4)},${e.p.y.toFixed(4)}`;
+            case "hatch":
+                return `HATCH  ${e.solid ? "SOLID" : e.pattern}  scale ${e.scale}`;
+            case "dim":
+                return `DIMENSION  ${e.dim.kind}`;
+            case "donut":
+                return `DONUT  ir ${e.ir.toFixed(4)}  or ${e.or.toFixed(4)}`;
+            case "xline":
+                return `XLINE`;
+            case "ray":
+                return `RAY`;
+            default:
+                return e.type;
+        }
+    }
+    function areaOf(e) {
+        if (e.type === "circle")
+            return Math.PI * e.r * e.r;
+        if (e.type === "donut")
+            return Math.PI * (e.or * e.or - e.ir * e.ir);
+        if (e.type === "polyline" && e.closed) {
+            const p = (0, geom_ts_1.tessellate)(e.pts, true);
+            let a = 0;
+            for (let i = 0; i < p.length; i++) {
+                const q = p[(i + 1) % p.length];
+                a += p[i].x * q.y - q.x * p[i].y;
+            }
+            return Math.abs(a) / 2;
+        }
+        if (e.type === "ellipse" && e.sweep >= math_ts_1.TAU - 1e-3) {
+            const major = Math.hypot(e.mx, e.my);
+            return Math.PI * major * major * e.ratio;
+        }
+        return null;
+    }
+    void geom_ts_1.mirrorVector;
+    void math_ts_1.add;
+    void math_ts_1.norm;
+
+  };
+
+  factories["doc.ts"] = function (exports, require, module) {
+
+    Object.defineProperty(exports, "__esModule", { value: true });
+    exports.Spatial = exports.Doc = void 0;
+    exports.queryHitsBox = queryHitsBox;
+    exports.freshDoc = freshDoc;
+    exports.stamp = stamp;
+    const entities_ts_1 = require("./entities.ts");
+    const math_ts_1 = require("./math.ts");
+    class Doc {
+        ents = new Map();
+        order = [];
+        layers = (0, entities_ts_1.defaultLayers)();
+        blocks = new Map();
+        currentLayer = "0";
+        ltscale = 1;
+        color = "bylayer";
+        lt = "bylayer";
+        lw = "bylayer";
+        dimtxt = 2.5;
+        prec = 4;
+        /** DXF $INSUNITS. 0 unitless, 1 inches, 4 mm, 5 cm, 6 m. */
+        units = 4;
+        fillet = 0;
+        chamferA = 0;
+        chamferB = 0;
+        offsetDist = 1;
+        rev = 0;
+        past = [];
+        future = [];
+        layer(name) {
+            return (0, entities_ts_1.layerOf)(this.layers, name);
+        }
+        ctx() {
+            return { blocks: this.blocks, layers: this.layers };
+        }
+        has(id) {
+            return this.ents.has(id);
+        }
+        get(id) {
+            return this.ents.get(id);
+        }
+        all() {
+            const out = [];
+            for (const id of this.order) {
+                const e = this.ents.get(id);
+                if (e)
+                    out.push(e);
+            }
+            return out;
+        }
+        add(e) {
+            this.ents.set(e.id, e);
+            this.order.push(e.id);
+        }
+        remove(id) {
+            this.ents.delete(id);
+            this.order = this.order.filter((x) => x !== id);
+        }
+        replace(e) {
+            if (!this.ents.has(e.id))
+                this.order.push(e.id);
+            this.ents.set(e.id, e);
+        }
+        bump() {
+            this.rev++;
+        }
+        snapshot() {
+            return {
+                ents: this.all().map((e) => (0, entities_ts_1.cloneEnt)(e)),
+                layers: structuredClone(this.layers),
+                blocks: [...this.blocks.values()].map((b) => structuredClone(b)),
+                currentLayer: this.currentLayer,
+                ltscale: this.ltscale,
+                color: this.color,
+                lt: this.lt,
+                lw: this.lw,
+                dimtxt: this.dimtxt,
+                prec: this.prec,
+                units: this.units,
+                fillet: this.fillet,
+                chamferA: this.chamferA,
+                chamferB: this.chamferB,
+                offsetDist: this.offsetDist,
+            };
+        }
+        restore(s) {
+            this.ents.clear();
+            this.order = [];
+            let maxId = 1;
+            for (const e of s.ents) {
+                this.ents.set(e.id, (0, entities_ts_1.cloneEnt)(e));
+                this.order.push(e.id);
+                const n = parseInt(e.id, 36);
+                if (Number.isFinite(n))
+                    maxId = Math.max(maxId, n + 1);
+            }
+            (0, entities_ts_1.resetIds)(maxId);
+            this.layers = structuredClone(s.layers);
+            this.blocks.clear();
+            for (const b of s.blocks)
+                this.blocks.set(b.name.toLowerCase(), structuredClone(b));
+            this.currentLayer = s.currentLayer;
+            this.ltscale = s.ltscale;
+            this.color = s.color;
+            this.lt = s.lt;
+            this.lw = s.lw;
+            this.dimtxt = s.dimtxt;
+            this.prec = s.prec;
+            this.units = s.units;
+            this.fillet = s.fillet;
+            this.chamferA = s.chamferA;
+            this.chamferB = s.chamferB;
+            this.offsetDist = s.offsetDist;
+            this.bump();
+        }
+        transact(fn) {
+            const before = this.snapshot();
+            fn();
+            const after = JSON.stringify(this.snapshot());
+            if (JSON.stringify(before) === after)
+                return false;
+            this.past.push(before);
+            if (this.past.length > 50)
+                this.past.shift();
+            this.future.length = 0;
+            this.bump();
+            return true;
+        }
+        undo() {
+            const s = this.past.pop();
+            if (!s)
+                return false;
+            this.future.push(this.snapshot());
+            this.restore(s);
+            return true;
+        }
+        redo() {
+            const s = this.future.pop();
+            if (!s)
+                return false;
+            this.past.push(this.snapshot());
+            this.restore(s);
+            return true;
+        }
+        clearGeometry() {
+            this.ents.clear();
+            this.order = [];
+            this.blocks.clear();
+            this.bump();
+        }
+        extents() {
+            let b = null;
+            for (const e of this.all()) {
+                if (e.type === "xline" || e.type === "ray")
+                    continue;
+                const eb = (0, entities_ts_1.entityBBox)(e, this.ctx());
+                if ((0, math_ts_1.boxEmpty)(eb))
+                    continue;
+                b = b ? {
+                    minx: Math.min(b.minx, eb.minx),
+                    miny: Math.min(b.miny, eb.miny),
+                    maxx: Math.max(b.maxx, eb.maxx),
+                    maxy: Math.max(b.maxy, eb.maxy),
+                } : eb;
+            }
+            return b;
+        }
+    }
+    exports.Doc = Doc;
+    class Spatial {
+        rev = -1;
+        cell = 40;
+        buckets = new Map();
+        infinite = [];
+        ensure(doc) {
+            if (this.rev === doc.rev)
+                return;
+            this.rev = doc.rev;
+            this.buckets.clear();
+            this.infinite = [];
+            const ents = doc.all();
+            if (!ents.length)
+                return;
+            let size = 0;
+            let n = 0;
+            for (const e of ents) {
+                if (e.type === "xline" || e.type === "ray") {
+                    this.infinite.push(e.id);
+                    continue;
+                }
+                const b = (0, entities_ts_1.entityBBox)(e, doc.ctx());
+                if ((0, math_ts_1.boxEmpty)(b))
+                    continue;
+                const w = b.maxx - b.minx;
+                const h = b.maxy - b.miny;
+                if (Number.isFinite(w) && Number.isFinite(h) && w < 1e8 && h < 1e8) {
+                    size += Math.max(w, h);
+                    n++;
+                }
+            }
+            this.cell = n ? Math.max(1, (size / n) * 2) : 40;
+            for (const e of ents) {
+                if (e.type === "xline" || e.type === "ray")
+                    continue;
+                const b = (0, entities_ts_1.entityBBox)(e, doc.ctx());
+                if ((0, math_ts_1.boxEmpty)(b))
+                    continue;
+                this.drop(e.id, b);
+            }
+        }
+        drop(id, b) {
+            const c = this.cell;
+            const x0 = Math.floor(b.minx / c);
+            const x1 = Math.floor(b.maxx / c);
+            const y0 = Math.floor(b.miny / c);
+            const y1 = Math.floor(b.maxy / c);
+            const span = (x1 - x0 + 1) * (y1 - y0 + 1);
+            if (span > 400) {
+                this.infinite.push(id);
+                return;
+            }
+            for (let x = x0; x <= x1; x++) {
+                for (let y = y0; y <= y1; y++) {
+                    const k = `${x}:${y}`;
+                    let arr = this.buckets.get(k);
+                    if (!arr)
+                        this.buckets.set(k, (arr = []));
+                    arr.push(id);
+                }
+            }
+        }
+        query(doc, box) {
+            this.ensure(doc);
+            const c = this.cell;
+            const seen = new Set(this.infinite);
+            const x0 = Math.floor(box.minx / c);
+            const x1 = Math.floor(box.maxx / c);
+            const y0 = Math.floor(box.miny / c);
+            const y1 = Math.floor(box.maxy / c);
+            for (let x = x0; x <= x1; x++) {
+                for (let y = y0; y <= y1; y++) {
+                    const arr = this.buckets.get(`${x}:${y}`);
+                    if (!arr)
+                        continue;
+                    for (const id of arr)
+                        seen.add(id);
+                }
+            }
+            const out = [];
+            for (const id of seen) {
+                const e = doc.get(id);
+                if (e)
+                    out.push(e);
+            }
+            return out;
+        }
+        near(doc, p, rad) {
+            return this.query(doc, (0, math_ts_1.expandBox)({ minx: p.x, miny: p.y, maxx: p.x, maxy: p.y }, rad));
+        }
+    }
+    exports.Spatial = Spatial;
+    function queryHitsBox(doc, index, box) {
+        return index.query(doc, box).filter((e) => {
+            const b = (0, entities_ts_1.entityBBox)(e, doc.ctx());
+            return e.type === "xline" || e.type === "ray" || (0, math_ts_1.boxIntersects)(b, box);
+        });
+    }
+    function freshDoc() {
+        const d = new Doc();
+        d.bump();
+        return d;
+    }
+    function stamp(doc, partial) {
+        const p = partial;
+        const layer = p.layer ?? doc.currentLayer;
+        const color = p.color ?? doc.color;
+        const lt = p.lt ?? doc.lt;
+        const lw = p.lw ?? doc.lw;
+        return { ...p, id: (0, entities_ts_1.uid)(), layer, color, lt, lw };
+    }
+
+  };
+
+  factories["dxf.ts"] = function (exports, require, module) {
+
+    Object.defineProperty(exports, "__esModule", { value: true });
+    exports.writeDxf = writeDxf;
+    exports.readDxf = readDxf;
+    exports.downloadDxf = downloadDxf;
+    const aci_ts_1 = require("./aci.ts");
+    const doc_ts_1 = require("./doc.ts");
+    const entities_ts_1 = require("./entities.ts");
+    const math_ts_1 = require("./math.ts");
+    const LT_PAT = {
+        continuous: [],
+        dashed: [0.5, -0.25],
+        hidden: [0.25, -0.125],
+        center: [1.25, -0.25, 0.25, -0.25],
+        phantom: [1.25, -0.25, 0.25, -0.25, 0.25, -0.25],
+        dot: [0, -0.25],
+        dashdot: [0.5, -0.25, 0, -0.25],
+        divide: [0.5, -0.25, 0, -0.25, 0, -0.25],
+    };
+    function num(n) {
+        if (!Number.isFinite(n))
+            return "0";
+        if (Math.abs(n) < 1e-12)
+            return "0";
+        const r = Math.round(n * 1e8) / 1e8;
+        return String(r);
+    }
+    let handleN = 0x40;
+    function hx() {
+        return (handleN++).toString(16).toUpperCase();
+    }
+    function colorCode(c) {
+        if (c === "bylayer")
+            return null;
+        if (c === "byblock")
+            return 0;
+        return c;
+    }
+    function pushEntHead(out, type, e) {
+        out.push("0", type, "5", hx(), "100", "AcDbEntity", "8", e.layer);
+        if (e.lt !== "bylayer" && e.lt !== "byblock")
+            out.push("6", e.lt.toUpperCase());
+        const col = colorCode(e.color);
+        if (col !== null)
+            out.push("62", String(col));
+        if (typeof e.lw === "number")
+            out.push("370", String(Math.round(e.lw * 100)));
+    }
+    function writeDxf(doc) {
+        handleN = 0x40;
+        const out = [];
+        const push = (...a) => {
+            for (const v of a)
+                out.push(String(v));
+        };
+        push("0", "SECTION", "2", "HEADER");
+        push("9", "$ACADVER", "1", "AC1015");
+        push("9", "$INSUNITS", "70", String(doc.units));
+        push("9", "$LTSCALE", "40", num(doc.ltscale));
+        push("9", "$CLAYER", "8", doc.currentLayer);
+        push("9", "$LIMMIN", "10", "0", "20", "0");
+        push("9", "$LIMMAX", "10", "420", "20", "297");
+        push("0", "ENDSEC");
+        push("0", "SECTION", "2", "TABLES");
+        push("0", "TABLE", "2", "LTYPE", "5", hx(), "100", "AcDbSymbolTable", "70", String(entities_ts_1.LINETYPES.length));
+        for (const name of entities_ts_1.LINETYPES) {
+            const pat = LT_PAT[name] ?? [];
+            push("0", "LTYPE", "5", hx(), "100", "AcDbSymbolTableRecord", "100", "AcDbLinetypeTableRecord");
+            push("2", name.toUpperCase(), "70", "0", "3", name, "72", "65", "73", String(pat.length), "40", num(pat.reduce((s, x) => s + Math.abs(x), 0)));
+            for (const p of pat)
+                push("49", num(p));
+        }
+        push("0", "ENDTAB");
+        push("0", "TABLE", "2", "LAYER", "5", hx(), "100", "AcDbSymbolTable", "70", String(doc.layers.length));
+        for (const layer of doc.layers) {
+            let flags = 0;
+            if (layer.frozen)
+                flags |= 1;
+            if (layer.locked)
+                flags |= 4;
+            const col = layer.on ? layer.color : -Math.abs(layer.color || 7);
+            push("0", "LAYER", "5", hx(), "100", "AcDbSymbolTableRecord", "100", "AcDbLayerTableRecord");
+            push("2", layer.name, "70", String(flags), "62", String(col), "6", layer.lt.toUpperCase(), "370", String(Math.round(layer.lw * 100)));
+        }
+        push("0", "ENDTAB");
+        push("0", "TABLE", "2", "STYLE", "5", hx(), "100", "AcDbSymbolTable", "70", "1");
+        push("0", "STYLE", "5", hx(), "100", "AcDbSymbolTableRecord", "100", "AcDbTextStyleTableRecord");
+        push("2", "STANDARD", "70", "0", "40", "0", "41", "1", "50", "0", "71", "0", "42", "2.5", "3", "txt", "4", "");
+        push("0", "ENDTAB");
+        push("0", "ENDSEC");
+        push("0", "SECTION", "2", "BLOCKS");
+        for (const block of doc.blocks.values()) {
+            push("0", "BLOCK", "5", hx(), "100", "AcDbEntity", "8", "0", "100", "AcDbBlockBegin");
+            push("2", block.name, "70", "0", "10", num(block.base.x), "20", num(block.base.y), "30", "0", "3", block.name, "1", "");
+            for (const e of block.ents)
+                writeEntity(out, e);
+            push("0", "ENDBLK", "5", hx(), "100", "AcDbEntity", "8", "0", "100", "AcDbBlockEnd");
+        }
+        push("0", "ENDSEC");
+        push("0", "SECTION", "2", "ENTITIES");
+        for (const e of doc.all())
+            writeEntity(out, e);
+        push("0", "ENDSEC");
+        push("0", "EOF");
+        return out.join("\r\n") + "\r\n";
+    }
+    function writeEntity(out, e) {
+        const push = (...a) => {
+            for (const v of a)
+                out.push(String(v));
+        };
+        switch (e.type) {
+            case "line":
+                pushEntHead(out, "LINE", e);
+                push("100", "AcDbLine", "10", num(e.a.x), "20", num(e.a.y), "30", "0", "11", num(e.b.x), "21", num(e.b.y), "31", "0");
+                return;
+            case "circle":
+                pushEntHead(out, "CIRCLE", e);
+                push("100", "AcDbCircle", "10", num(e.c.x), "20", num(e.c.y), "30", "0", "40", num(e.r));
+                return;
+            case "arc": {
+                pushEntHead(out, "ARC", e);
+                const a0 = (e.a0 * 180) / Math.PI;
+                const a1 = ((e.a0 + e.sweep) * 180) / Math.PI;
+                push("100", "AcDbCircle", "10", num(e.c.x), "20", num(e.c.y), "30", "0", "40", num(e.r));
+                push("100", "AcDbArc", "50", num(a0), "51", num(a1));
+                return;
+            }
+            case "polyline":
+                writePolyline(out, e);
+                return;
+            case "point":
+                pushEntHead(out, "POINT", e);
+                push("100", "AcDbPoint", "10", num(e.p.x), "20", num(e.p.y), "30", "0");
+                return;
+            case "text": {
+                if (e.text.includes("\n")) {
+                    writeMtext(out, e);
+                    return;
+                }
+                pushEntHead(out, "TEXT", e);
+                const halign = e.align === "center" ? 1 : e.align === "right" ? 2 : 0;
+                push("100", "AcDbText", "10", num(e.p.x), "20", num(e.p.y), "30", "0");
+                push("40", num(e.h), "1", e.text.replace(/[\r\n]/g, " "), "50", num((e.rot * 180) / Math.PI), "7", "STANDARD");
+                if (halign)
+                    push("72", String(halign), "11", num(e.p.x), "21", num(e.p.y), "31", "0");
+                push("100", "AcDbText", "73", "0");
+                return;
+            }
+            case "ellipse": {
+                pushEntHead(out, "ELLIPSE", e);
+                push("100", "AcDbEllipse", "10", num(e.c.x), "20", num(e.c.y), "30", "0");
+                push("11", num(e.mx), "21", num(e.my), "31", "0", "40", num(e.ratio));
+                push("41", num(e.a0), "42", num(e.a0 + e.sweep));
+                return;
+            }
+            case "spline": {
+                // Portable approximation — true fit-point splines need knot vectors many readers reject.
+                const pts = e.pts;
+                writePolyline(out, {
+                    ...e,
+                    type: "polyline",
+                    pts: pts.map((p) => ({ x: p.x, y: p.y })),
+                    closed: false,
+                    width: 0,
+                });
+                return;
+            }
+            case "xline":
+            case "ray": {
+                const dx = e.b.x - e.a.x;
+                const dy = e.b.y - e.a.y;
+                pushEntHead(out, e.type === "xline" ? "XLINE" : "RAY", e);
+                push("100", e.type === "xline" ? "AcDbXline" : "AcDbRay");
+                push("10", num(e.a.x), "20", num(e.a.y), "30", "0", "11", num(dx), "21", num(dy), "31", "0");
+                return;
+            }
+            case "donut": {
+                const r = (e.ir + e.or) / 2;
+                const w = Math.max(0, e.or - e.ir);
+                writePolyline(out, {
+                    ...e,
+                    type: "polyline",
+                    pts: [
+                        { x: e.c.x - r, y: e.c.y, b: 1 },
+                        { x: e.c.x + r, y: e.c.y, b: 1 },
+                    ],
+                    closed: true,
+                    width: w,
+                });
+                return;
+            }
+            case "insert":
+                pushEntHead(out, "INSERT", e);
+                push("100", "AcDbBlockReference", "2", e.name);
+                push("10", num(e.p.x), "20", num(e.p.y), "30", "0");
+                push("41", num(e.sx), "42", num(e.sy), "50", num((e.rot * 180) / Math.PI));
+                return;
+            case "hatch":
+                writeHatch(out, e);
+                return;
+            case "dim":
+                for (const part of (0, entities_ts_1.explodeDim)(e))
+                    writeEntity(out, part);
+                return;
+            default:
+                return;
+        }
+    }
+    function writePolyline(out, e) {
+        const push = (...a) => {
+            for (const v of a)
+                out.push(String(v));
+        };
+        pushEntHead(out, "LWPOLYLINE", e);
+        push("100", "AcDbPolyline", "90", String(e.pts.length), "70", e.closed ? "1" : "0");
+        if (e.width > 1e-9)
+            push("43", num(e.width));
+        for (const p of e.pts) {
+            push("10", num(p.x), "20", num(p.y));
+            if (p.b)
+                push("42", num(p.b));
+        }
+    }
+    function writeMtext(out, e) {
+        const push = (...a) => {
+            for (const v of a)
+                out.push(String(v));
+        };
+        const body = e.text.replace(/\n/g, "\\P");
+        pushEntHead(out, "MTEXT", e);
+        push("100", "AcDbMText", "10", num(e.p.x), "20", num(e.p.y), "30", "0");
+        push("40", num(e.h), "41", num(Math.max(e.h, e.text.length * e.h * 0.6)));
+        const chunks = body.match(/[\s\S]{1,250}/g) ?? [""];
+        for (let i = 0; i < chunks.length - 1; i++)
+            push("3", chunks[i]);
+        push("1", chunks[chunks.length - 1] ?? "");
+        push("50", num((e.rot * 180) / Math.PI), "71", e.align === "center" ? "5" : e.align === "right" ? "6" : "1");
+    }
+    function writeHatch(out, e) {
+        const push = (...a) => {
+            for (const v of a)
+                out.push(String(v));
+        };
+        pushEntHead(out, "HATCH", e);
+        push("100", "AcDbHatch");
+        push("10", "0", "20", "0", "30", "0", "210", "0", "220", "0", "230", "1");
+        push("2", e.solid ? "SOLID" : e.pattern);
+        push("70", e.solid ? "1" : "0", "71", "0");
+        push("91", String(e.loops.length));
+        for (const loop of e.loops) {
+            if ("circle" in loop) {
+                // Non-polyline edge: one circular edge.
+                push("92", "1", "93", "1", "72", "2");
+                push("10", num(loop.circle.c.x), "20", num(loop.circle.c.y), "40", num(loop.circle.r));
+                push("50", "0", "51", "360");
+                push("73", "1");
+                push("97", "0");
+            }
+            else {
+                push("92", "7", "72", "1", "73", loop.closed ? "1" : "0", "93", String(loop.pts.length));
+                for (const p of loop.pts) {
+                    push("10", num(p.x), "20", num(p.y));
+                    push("42", num(p.b ?? 0));
+                }
+                push("97", "0");
+            }
+        }
+        push("75", "0", "76", "1");
+        if (!e.solid) {
+            push("52", num(e.angle), "41", num(e.scale));
+            const def = patternDef(e.pattern);
+            push("77", "0", "78", String(def.length));
+            for (const line of def) {
+                push("53", num(line.ang + e.angle), "43", "0", "44", "0");
+                push("45", num(line.ox * e.scale), "46", num(line.oy * e.scale), "79", "0");
+            }
+        }
+        push("98", "1", "10", "0", "20", "0");
+    }
+    function patternDef(name) {
+        const n = name.toUpperCase();
+        if (n === "ANSI37")
+            return [
+                { ang: 45, ox: 0, oy: 3.175 },
+                { ang: 135, ox: 0, oy: 3.175 },
+            ];
+        if (n === "ANSI32")
+            return [
+                { ang: 45, ox: 0, oy: 3.175 },
+                { ang: 45, ox: 1.5875, oy: 3.175 },
+            ];
+        if (n === "DOTS")
+            return [{ ang: 0, ox: 0, oy: 3.175 }];
+        return [{ ang: 45, ox: 0, oy: 3.175 }];
+    }
+    function lex(text) {
+        const lines = text.replace(/^\uFEFF/, "").split(/\r\n|\n|\r/);
+        const out = [];
+        for (let i = 0; i + 1 < lines.length; i += 2) {
+            const c = Number(lines[i].trim());
+            if (!Number.isFinite(c))
+                break;
+            out.push({ c, v: lines[i + 1] ?? "" });
+        }
+        return out;
+    }
+    function f(v) {
+        const n = Number(v.trim());
+        return Number.isFinite(n) ? n : 0;
+    }
+    function bagGet(bag, code, all = false) {
+        const xs = bag.filter((p) => p.c === code).map((p) => p.v);
+        return all ? xs : xs.slice(-1);
+    }
+    function readDxf(text) {
+        const pairs = lex(text);
+        const warnings = [];
+        const doc = new doc_ts_1.Doc();
+        doc.layers = [];
+        doc.clearGeometry();
+        let maxId = 1;
+        const takeId = () => {
+            const id = maxId.toString(36);
+            maxId++;
+            return id;
+        };
+        let i = 0;
+        let section = "";
+        const entities = [];
+        const blocks = new Map();
+        const readBag = () => {
+            if (i >= pairs.length || pairs[i].c !== 0)
+                return null;
+            const type = pairs[i].v.trim();
+            i++;
+            const bag = [];
+            while (i < pairs.length && pairs[i].c !== 0)
+                bag.push(pairs[i++]);
+            return { type, bag };
+        };
+        while (i < pairs.length) {
+            const rec = readBag();
+            if (!rec)
+                break;
+            const t = rec.type.toUpperCase();
+            if (t === "SECTION") {
+                section = (bagGet(rec.bag, 2)[0] ?? "").trim().toUpperCase();
+                continue;
+            }
+            if (t === "ENDSEC") {
+                section = "";
+                continue;
+            }
+            if (t === "EOF")
+                break;
+            if (section === "HEADER") {
+                continue;
+            }
+            if (section === "TABLES" && t === "LAYER") {
+                const name = (bagGet(rec.bag, 2)[0] ?? "0").trim();
+                const flags = f(bagGet(rec.bag, 70)[0] ?? "0");
+                let col = f(bagGet(rec.bag, 62)[0] ?? "7");
+                const on = col >= 0;
+                col = Math.abs(col) || 7;
+                const lt = mapLt((bagGet(rec.bag, 6)[0] ?? "CONTINUOUS").trim());
+                const lw = Math.abs(f(bagGet(rec.bag, 370)[0] ?? "25")) / 100;
+                doc.layers.push({
+                    name,
+                    color: col > 255 ? 7 : col,
+                    lt,
+                    lw: lw > 2.11 ? 0.25 : lw,
+                    on,
+                    frozen: (flags & 1) !== 0,
+                    locked: (flags & 4) !== 0,
+                });
+                continue;
+            }
+            if (section === "BLOCKS" && t === "BLOCK") {
+                const name = (bagGet(rec.bag, 2)[0] ?? "").trim();
+                const base = { x: f(bagGet(rec.bag, 10)[0] ?? "0"), y: f(bagGet(rec.bag, 20)[0] ?? "0") };
+                const ents = [];
+                if (name.startsWith("*")) {
+                    while (i < pairs.length) {
+                        const peek = pairs[i];
+                        if (peek.c === 0 && peek.v.trim().toUpperCase() === "ENDBLK") {
+                            readBag();
+                            break;
+                        }
+                        readBag();
+                    }
+                    continue;
+                }
+                while (i < pairs.length) {
+                    const peek = pairs[i];
+                    if (peek.c === 0 && peek.v.trim().toUpperCase() === "ENDBLK") {
+                        readBag();
+                        break;
+                    }
+                    const er = readBag();
+                    if (!er)
+                        break;
+                    const ent = entityFrom(er.type, er.bag, takeId, warnings);
+                    if (ent)
+                        ents.push(ent);
+                    else if (er.type.toUpperCase() === "POLYLINE") {
+                        const poly = readLegacyPoly(er.bag, takeId, warnings, () => {
+                            const vr = readBag();
+                            return vr;
+                        });
+                        void poly;
+                    }
+                }
+                if (name)
+                    blocks.set(name.toLowerCase(), { name, base, ents });
+                continue;
+            }
+            if (section === "ENTITIES") {
+                if (t === "POLYLINE") {
+                    const verts = [];
+                    let closed = (f(bagGet(rec.bag, 70)[0] ?? "0") & 1) !== 0;
+                    const common = commonStyle(rec.bag);
+                    while (i < pairs.length) {
+                        const peek = pairs[i];
+                        if (peek.c !== 0)
+                            break;
+                        const nt = peek.v.trim().toUpperCase();
+                        if (nt === "SEQEND") {
+                            readBag();
+                            break;
+                        }
+                        if (nt !== "VERTEX")
+                            break;
+                        const vr = readBag();
+                        if (!vr)
+                            break;
+                        const x = f(bagGet(vr.bag, 10)[0] ?? "0");
+                        const y = f(bagGet(vr.bag, 20)[0] ?? "0");
+                        const b = f(bagGet(vr.bag, 42)[0] ?? "0");
+                        verts.push(b ? { x, y, b } : { x, y });
+                    }
+                    if (verts.length >= 2) {
+                        entities.push({
+                            ...common,
+                            id: takeId(),
+                            type: "polyline",
+                            pts: verts,
+                            closed,
+                            width: f(bagGet(rec.bag, 40)[0] ?? "0"),
+                        });
+                    }
+                    continue;
+                }
+                const ent = entityFrom(rec.type, rec.bag, takeId, warnings);
+                if (ent)
+                    entities.push(ent);
+                else if (!["SEQEND", "VERTEX", "ENDBLK", "ENDTAB", "TABLE"].includes(t)) {
+                    if (t !== "VIEWPORT" && t !== "DIMENSION" && t !== "ATTDEF" && t !== "ATTRIB")
+                        warnings.push(`Skipped ${t}`);
+                    if (t === "DIMENSION") {
+                        const dim = dimensionFrom(rec.bag, takeId);
+                        if (dim)
+                            entities.push(dim);
+                    }
+                }
+            }
+        }
+        for (let k = 0; k < pairs.length; k++) {
+            if (pairs[k].c === 9) {
+                const key = pairs[k].v.trim().toUpperCase();
+                const val = pairs[k + 1];
+                if (!val)
+                    continue;
+                if (key === "$INSUNITS")
+                    doc.units = f(val.v);
+                if (key === "$LTSCALE")
+                    doc.ltscale = f(val.v) || 1;
+                if (key === "$CLAYER" && val.c === 8)
+                    doc.currentLayer = val.v.trim() || "0";
+            }
+        }
+        if (!doc.layers.length)
+            doc.layers = [{ name: "0", color: 7, lt: "continuous", lw: 0.25, on: true, frozen: false, locked: false }];
+        if (!doc.layers.some((l) => l.name === "0")) {
+            doc.layers.unshift({ name: "0", color: 7, lt: "continuous", lw: 0.25, on: true, frozen: false, locked: false });
+        }
+        if (!doc.layers.some((l) => l.name.toLowerCase() === doc.currentLayer.toLowerCase()))
+            doc.currentLayer = "0";
+        for (const e of entities)
+            doc.add(e);
+        for (const b of blocks.values())
+            doc.blocks.set(b.name.toLowerCase(), b);
+        (0, entities_ts_1.resetIds)(maxId + 2);
+        doc.past = [];
+        doc.future = [];
+        doc.bump();
+        return { doc, warnings };
+    }
+    function readLegacyPoly(_bag, _id, _warnings, _next) {
+        return null;
+    }
+    function mapLt(name) {
+        const n = name.toLowerCase().replace(/\s+/g, "");
+        if (n.includes("phantom"))
+            return "phantom";
+        if (n.includes("center") || n.includes("centre"))
+            return "center";
+        if (n.includes("hidden") || n.includes("dashdot") && n.includes("hidden"))
+            return "hidden";
+        if (n.includes("divide"))
+            return "divide";
+        if (n.includes("dashdot"))
+            return "dashdot";
+        if (n === "dot" || n.includes("dotted"))
+            return "dot";
+        if (n.includes("dash"))
+            return "dashed";
+        if (entities_ts_1.LINETYPES.includes(n))
+            return n;
+        return "continuous";
+    }
+    function commonStyle(bag) {
+        const layer = (bagGet(bag, 8)[0] ?? "0").trim() || "0";
+        let color = "bylayer";
+        const c62 = bag.find((p) => p.c === 62);
+        if (c62) {
+            const n = f(c62.v);
+            if (n === 0)
+                color = "byblock";
+            else if (n === 256)
+                color = "bylayer";
+            else if (n > 0 && n < 256)
+                color = n;
+        }
+        const truecolor = bag.find((p) => p.c === 420);
+        if (truecolor && color === "bylayer") {
+            const n = f(truecolor.v) >>> 0;
+            const r = (n >> 16) & 255;
+            const g = (n >> 8) & 255;
+            const b = n & 255;
+            color = (0, aci_ts_1.nearestAci)(r, g, b);
+        }
+        let lt = "bylayer";
+        const c6 = bag.find((p) => p.c === 6);
+        if (c6) {
+            const name = c6.v.trim().toLowerCase();
+            if (name === "bylayer")
+                lt = "bylayer";
+            else if (name === "byblock")
+                lt = "byblock";
+            else
+                lt = mapLt(name);
+        }
+        let lw = "bylayer";
+        const c370 = bag.find((p) => p.c === 370);
+        if (c370) {
+            const n = f(c370.v);
+            if (n === -1)
+                lw = "bylayer";
+            else if (n === -2)
+                lw = "byblock";
+            else if (n >= 0)
+                lw = n / 100;
+        }
+        return { layer, color, lt, lw };
+    }
+    function entityFrom(type, bag, id, warnings) {
+        const t = type.trim().toUpperCase();
+        const st = commonStyle(bag);
+        const x = (code, nth = 0) => f((bag.filter((p) => p.c === code)[nth] ?? { v: "0" }).v);
+        if (t === "LINE") {
+            return { ...st, id: id(), type: "line", a: { x: x(10), y: x(20) }, b: { x: x(11), y: x(21) } };
+        }
+        if (t === "CIRCLE") {
+            const r = x(40);
+            if (r <= 0)
+                return null;
+            return { ...st, id: id(), type: "circle", c: { x: x(10), y: x(20) }, r };
+        }
+        if (t === "ARC") {
+            const r = x(40);
+            if (r <= 0)
+                return null;
+            const a0 = (x(50) * Math.PI) / 180;
+            const a1 = (x(51) * Math.PI) / 180;
+            return { ...st, id: id(), type: "arc", c: { x: x(10), y: x(20) }, r, a0, sweep: (0, math_ts_1.ccwSweep)(a0, a1) };
+        }
+        if (t === "POINT")
+            return { ...st, id: id(), type: "point", p: { x: x(10), y: x(20) } };
+        if (t === "LWPOLYLINE") {
+            const closed = (f(bagGet(bag, 70)[0] ?? "0") & 1) !== 0;
+            const width = f(bagGet(bag, 43)[0] ?? "0");
+            const pts = [];
+            let cur = null;
+            for (const p of bag) {
+                if (p.c === 10) {
+                    if (cur)
+                        pts.push(cur);
+                    cur = { x: f(p.v), y: 0 };
+                }
+                else if (p.c === 20 && cur)
+                    cur.y = f(p.v);
+                else if (p.c === 42 && cur) {
+                    const b = f(p.v);
+                    if (Math.abs(b) > 1e-12)
+                        cur.b = b;
+                }
+            }
+            if (cur)
+                pts.push(cur);
+            if (pts.length < 2)
+                return null;
+            return { ...st, id: id(), type: "polyline", pts, closed, width };
+        }
+        if (t === "TEXT" || t === "ATTRIB") {
+            const text = bagGet(bag, 1)[0] ?? "";
+            const h = x(40) || 
