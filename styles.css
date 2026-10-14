@@ -233,7 +233,7 @@ button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
 
 .nl-body {
   display: grid;
-  grid-template-columns: 3.4rem minmax(0, 1fr) 17.5rem;
+  grid-template-columns: 6.1rem minmax(0, 1fr) 17.5rem;
   min-height: 0;
   position: relative;
 }
@@ -242,11 +242,13 @@ button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
   border-right: 1px solid var(--nl-line);
   overflow: auto;
   padding: 0.35rem 0.25rem 0.8rem;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-content: start;
   gap: 0.15rem;
 }
 .nl-tool-label {
+  grid-column: 1 / -1;
   font-size: 0.58rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -671,3 +673,50 @@ button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
   }
 }
 
+
+.nl-side-toggle {
+  display: none;
+}
+.nl-palette {
+  display: grid;
+  grid-template-columns: repeat(8, 1fr);
+  gap: 3px;
+  padding: 0.25rem 0.6rem 0.5rem;
+}
+.nl-palette button {
+  height: 1.05rem;
+  border: 1px solid var(--nl-line);
+  border-radius: 0.2rem;
+  padding: 0;
+}
+.nl-palette button.is-on {
+  outline: 2px solid var(--nl-brass);
+}
+.nl-newlayer {
+  padding: 0.2rem 0.6rem 0.4rem;
+}
+.nl-newlayer input,
+.nl-layer-rename {
+  width: 100%;
+  background: var(--nl-bg);
+  color: var(--nl-text);
+  border: 1px solid var(--nl-brass);
+  border-radius: 0.35rem;
+  padding: 0.25rem 0.4rem;
+  font: inherit;
+  font-size: 0.78rem;
+}
+.nl-flag {
+  min-width: 1.75rem;
+}
+@media (max-width: 860px) {
+  .nl-side-toggle {
+    display: inline-block;
+  }
+  .nl-tools {
+    display: flex;
+  }
+  .nl-tool-label {
+    grid-column: auto;
+  }
+}

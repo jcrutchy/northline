@@ -1081,11 +1081,42 @@
         }
     }
     function mapDim(d, fn, sc) {
-        if (d.kind === "linear")
-            return { ...d, p1: fn(d.p1), p2: fn(d.p2), loc: fn(d.loc) };
+        const th = d.th !== undefined ? d.th * sc : undefined;
+        const keep = th !== undefined ? { th } : {};
+        const turn = (c, ang) => {
+            const a = fn(c);
+            const b = fn({ x: c.x + Math.cos(ang), y: c.y + Math.sin(ang) });
+            return Math.atan2(b.y - a.y, b.x - a.x);
+        };
+        if (d.kind === "linear") {
+            const p1 = fn(d.p1);
+            const p2 = fn(d.p2);
+            const loc = fn(d.loc);
+            let axis = d.axis;
+            if (axis === "h" || axis === "v") {
+                // Which way does the original measuring axis point after the transform?
+                const o = fn({ x: 0, y: 0 });
+                const t = fn(axis === "h" ? { x: 1, y: 0 } : { x: 0, y: 1 });
+                const ang = Math.atan2(t.y - o.y, t.x - o.x);
+                const q = ((ang % Math.PI) + Math.PI) % Math.PI;
+                if (Math.abs(q) < 1e-6 || Math.abs(q - Math.PI) < 1e-6)
+                    axis = "h";
+                else if (Math.abs(q - Math.PI / 2) < 1e-6)
+                    axis = "v";
+                else
+                    axis = "aligned";
+            }
+            return { ...d, ...keep, axis, p1, p2, loc };
+        }
         if (d.kind === "radial")
-            return { ...d, c: fn(d.c), r: d.r * sc };
-        return { ...d, c: fn(d.c), r: d.r * sc };
+            return { ...d, ...keep, c: fn(d.c), r: d.r * sc, ang: turn(d.c, d.ang) };
+        const a0 = turn(d.c, d.a0);
+        const a1 = turn(d.c, d.a1);
+        const o = fn({ x: 0, y: 0 });
+        const ex = fn({ x: 1, y: 0 });
+        const ey = fn({ x: 0, y: 1 });
+        const flipped = (ex.x - o.x) * (ey.y - o.y) - (ex.y - o.y) * (ey.x - o.x) < 0;
+        return { ...d, ...keep, c: fn(d.c), r: d.r * sc, a0: flipped ? a1 : a0, a1: flipped ? a0 : a1 };
     }
     function translateEnt(e, d) {
         if ((0, math_ts_1.len)(d) < 1e-15)
@@ -1162,15 +1193,14 @@
                 return b;
             }
             case "text": {
-                const w = Math.max(e.h, e.text.length * e.h * 0.62);
-                const corners = [
-                    { x: 0, y: 0 },
-                    { x: e.align === "center" ? -w / 2 : e.align === "right" ? -w : 0, y: 0 },
-                ];
+                const tl = e.text.split("\n");
+                const w = Math.max(e.h, Math.max(...tl.map((l) => l.length)) * e.h * 0.62);
+                const corners = [];
                 const x0 = e.align === "center" ? -w / 2 : e.align === "right" ? -w : 0;
+                const yLow = -(tl.length - 1) * e.h * 1.25 - e.h * 0.25;
                 const local = [
-                    { x: x0, y: 0 },
-                    { x: x0 + w, y: 0 },
+                    { x: x0, y: yLow },
+                    { x: x0 + w, y: yLow },
                     { x: x0 + w, y: e.h },
                     { x: x0, y: e.h },
                 ];
@@ -1406,6 +1436,8 @@
         if (mode === "window")
             return (0, math_ts_1.boxInside)(b, box);
         if ((0, math_ts_1.boxInside)(b, box))
+            return true;
+        if (e.type === "text" || e.type === "point")
             return true;
         return curvesOf(e, ctx).some((c) => {
             if (c.k === "line")
@@ -1726,6 +1758,23 @@
             return [d.c, (0, geom_ts_1.arcPoint)(d.c, d.r, d.ang)];
         return [d.c, (0, geom_ts_1.arcPoint)(d.c, d.r, d.a0), (0, geom_ts_1.arcPoint)(d.c, d.r, d.a1)];
     }
+    function arrowSolid(st, tip, dir, size) {
+        const u = (0, math_ts_1.norm)(dir);
+        if (u.x === 0 && u.y === 0)
+            return null;
+        const n = { x: -u.y, y: u.x };
+        const b = { x: tip.x - u.x * size, y: tip.y - u.y * size };
+        return {
+            ...st,
+            id: uid(),
+            type: "hatch",
+            solid: true,
+            pattern: "SOLID",
+            scale: 1,
+            angle: 0,
+            loops: [{ closed: true, pts: [{ x: tip.x, y: tip.y }, { x: b.x + n.x * size * 0.28, y: b.y + n.y * size * 0.28 }, { x: b.x - n.x * size * 0.28, y: b.y - n.y * size * 0.28 }] }],
+        };
+    }
     function explodeDim(e) {
         const st = { layer: e.layer, color: e.color, lt: "continuous", lw: e.lw };
         const text = (p, str, h, rot = 0) => ({
@@ -1739,11 +1788,22 @@
             align: "center",
         });
         const line = (a, b) => ({ ...st, id: uid(), type: "line", a, b });
-        const h = 2.5;
+        const h = e.dim.th ?? 2.5;
+        const pr = Math.max(0, Math.min(8, e.dim.prec ?? 2));
+        const arrows = [];
+        const addArrow = (tip, dir, size) => {
+            const a = arrowSolid(st, tip, dir, size);
+            if (a)
+                arrows.push(a);
+        };
         if (e.dim.kind === "radial") {
             const tip = (0, geom_ts_1.arcPoint)(e.dim.c, e.dim.r, e.dim.ang);
-            const label = `${e.dim.dia ? "Ø" : "R"}${(e.dim.dia ? e.dim.r * 2 : e.dim.r).toFixed(2)}`;
-            return [line(e.dim.c, tip), text((0, math_ts_1.add)(tip, { x: h, y: h }), label, h)];
+            const tail = e.dim.dia ? (0, geom_ts_1.arcPoint)(e.dim.c, e.dim.r, e.dim.ang + Math.PI) : e.dim.c;
+            const label = `${e.dim.dia ? "Ø" : "R"}${(e.dim.dia ? e.dim.r * 2 : e.dim.r).toFixed(pr)}`;
+            addArrow(tip, (0, math_ts_1.sub)(tip, e.dim.c), h * 0.7);
+            if (e.dim.dia)
+                addArrow(tail, (0, math_ts_1.sub)(tail, e.dim.c), h * 0.7);
+            return [line(tail, tip), text((0, math_ts_1.add)(tip, { x: h * 0.4 + h * label.length * 0.3, y: h * 0.4 }), label, h), ...arrows];
         }
         if (e.dim.kind === "angular") {
             const samples = [];
@@ -1755,19 +1815,25 @@
                 samples.push(line(prev, q));
                 prev = q;
             }
-            const mid = (0, geom_ts_1.arcPoint)(e.dim.c, e.dim.r, e.dim.a0 + sweep / 2);
+            const mid = (0, geom_ts_1.arcPoint)(e.dim.c, e.dim.r + h * 0.4, e.dim.a0 + sweep / 2);
             const deg = (sweep * 180) / Math.PI;
-            samples.push(text(mid, `${deg.toFixed(1)}°`, h));
-            return samples;
+            samples.push(text(mid, `${deg.toFixed(Math.min(pr, 2))}°`, h));
+            const sA = (0, geom_ts_1.arcPoint)(e.dim.c, e.dim.r, e.dim.a0);
+            const tA = (0, geom_ts_1.arcPoint)(e.dim.c, e.dim.r, e.dim.a0 + sweep);
+            addArrow(sA, { x: Math.sin(e.dim.a0), y: -Math.cos(e.dim.a0) }, h * 0.65);
+            addArrow(tA, { x: -Math.sin(e.dim.a0 + sweep), y: Math.cos(e.dim.a0 + sweep) }, h * 0.65);
+            return [...samples, ...arrows];
         }
-        const built = linearDimGeom(e.dim, h);
+        const built = linearDimGeom({ ...e.dim, prec: pr }, h);
         const ents = [
             line(built.ext1[0], built.ext1[1]),
             line(built.ext2[0], built.ext2[1]),
             line(built.dim[0], built.dim[1]),
             text(built.textPt, built.label, h, built.textRot),
         ];
-        return ents;
+        for (const a of built.arrows)
+            addArrow(a.tip, a.dir, h * 0.7);
+        return [...ents, ...arrows];
     }
     function linearDimGeom(d, textH) {
         const gap = textH * 0.28;
@@ -1819,7 +1885,7 @@
             dim: [q1, q2],
             textPt: (0, math_ts_1.add)(mid, lift),
             textRot,
-            label: measure.toFixed(2),
+            label: measure.toFixed(Math.max(0, Math.min(8, d.prec ?? 2))),
             arrows: [
                 { tip: q1, dir: (0, math_ts_1.norm)((0, math_ts_1.sub)(q1, q2)) },
                 { tip: q2, dir: (0, math_ts_1.norm)((0, math_ts_1.sub)(q2, q1)) },
@@ -1943,8 +2009,19 @@
             }
             if (bestI < 0)
                 return null;
+            if (e.closed) {
+                // Re-start the loop just after the trimmed segment so it becomes an open path ending on that segment.
+                const rot = [];
+                for (let k = 0; k < n; k++)
+                    rot.push({ ...e.pts[(bestI + 1 + k) % n] });
+                const dup = { ...e.pts[(bestI + 1) % n] };
+                delete dup.b;
+                rot.push(dup);
+                e = { ...e, closed: false, pts: rot, __wasClosed: true };
+                bestI = n - 1;
+            }
             const p = e.pts[bestI];
-            const q = e.pts[(bestI + 1) % n];
+            const q = e.pts[(bestI + 1) % e.pts.length];
             const arc = p.b ? (0, geom_ts_1.bulgeArc)(p, q, p.b) : null;
             if (arc) {
                 const asEnt = {
@@ -1974,48 +2051,62 @@
         return Math.atan2(Math.sin(a - b), Math.cos(a - b));
     }
     function splicePoly(e, seg, repl) {
-        const n = e.pts.length;
         const st = styleOf(e);
-        const before = e.pts.slice(0, seg + 1);
-        const after = e.pts.slice(seg + 1);
-        // A trimmed segment becomes 0, 1, or 2 pieces. Rebuild up to two polylines.
-        if (repl.length === 0) {
-            const pts = [...before.slice(0, -1), ...after];
-            if (pts.length < 2)
-                return [];
-            return [{ ...st, id: uid(), type: "polyline", pts, closed: false, width: e.width }];
-        }
+        const tol = 1e-7;
+        const same = (a, b) => (0, math_ts_1.dist)(a, b) <= tol * Math.max(1, Math.abs(a.x) + Math.abs(a.y));
+        const strip = (p) => ({ x: p.x, y: p.y });
+        const p0 = e.pts[seg];
+        const q0 = e.pts[seg + 1];
         const toPts = (ent) => {
             if (ent.type === "line")
-                return [ent.a, ent.b];
+                return [{ x: ent.a.x, y: ent.a.y }, { x: ent.b.x, y: ent.b.y }];
             if (ent.type === "arc") {
-                const s = (0, geom_ts_1.arcPoint)(ent.c, ent.r, ent.a0);
-                const end = (0, geom_ts_1.arcPoint)(ent.c, ent.r, ent.a0 + ent.sweep);
-                const sweep = ent.sweep;
-                const bulge = Math.tan(sweep / 4);
-                return [{ ...s, b: bulge }, end];
+                const s0 = (0, geom_ts_1.arcPoint)(ent.c, ent.r, ent.a0);
+                const en = (0, geom_ts_1.arcPoint)(ent.c, ent.r, ent.a0 + ent.sweep);
+                return [{ ...s0, b: Math.tan(ent.sweep / 4) }, { ...en }];
             }
             return [];
         };
-        if (repl.length === 1) {
-            const bits = toPts(repl[0]);
+        const before = e.pts.slice(0, seg + 1).map((p, i, arr) => (i === arr.length - 1 ? strip(p) : { ...p }));
+        const after = e.pts.slice(seg + 1).map((p) => ({ ...p }));
+        const chains = [];
+        let cur = before;
+        let attachedEnd = false;
+        repl.forEach((piece, i) => {
+            const bits = toPts(piece);
             if (bits.length < 2)
-                return [e];
-            const pts = [...before.slice(0, -1), bits[0], bits[1], ...after.slice(1)];
-            // If the original was closed and we shortened one end, open it when the join breaks.
-            return [{ ...st, id: uid(), type: "polyline", pts, closed: e.closed && (0, math_ts_1.dist)(pts[0], pts[pts.length - 1]) < 1e-6, width: e.width }];
+                return;
+            if (i === 0 && same(bits[0], p0)) {
+                cur = [...cur.slice(0, -1), ...bits];
+            }
+            else {
+                if (cur.length >= 2)
+                    chains.push(cur);
+                cur = bits;
+            }
+            if (i === repl.length - 1 && same(bits[bits.length - 1], q0)) {
+                cur = [...cur.slice(0, -1), ...after];
+                attachedEnd = true;
+            }
+        });
+        if (cur.length >= 2)
+            chains.push(cur);
+        if (!attachedEnd && after.length >= 2)
+            chains.push(after);
+        let out = chains;
+        if (e.__wasClosed && chains.length >= 2) {
+            const first = chains[0];
+            const last = chains[chains.length - 1];
+            const rot0 = e.pts[0];
+            const rotN = e.pts[e.pts.length - 1];
+            if (same(first[0], rot0) && same(last[last.length - 1], rotN)) {
+                const merged = [...last.slice(0, -1), ...first];
+                out = [merged, ...chains.slice(1, -1)];
+            }
         }
-        const A = toPts(repl[0]);
-        const B = toPts(repl[1]);
-        const out = [];
-        const left = [...before.slice(0, -1), ...(A[0] ? [A[0]] : []), ...(A[1] ? [A[1]] : [])];
-        const right = [...(B[0] ? [B[0]] : []), ...(B[1] ? [B[1]] : []), ...after.slice(1)];
-        if (left.length >= 2)
-            out.push({ ...st, id: uid(), type: "polyline", pts: left, closed: false, width: e.width });
-        if (right.length >= 2)
-            out.push({ ...st, id: uid(), type: "polyline", pts: right, closed: false, width: e.width });
-        void n;
-        return out;
+        return out
+            .filter((pts) => pts.length >= 2)
+            .map((pts) => ({ ...st, id: uid(), type: "polyline", pts, closed: false, width: e.width }));
     }
     function extendEntity(e, bounds, pick) {
         if (e.type === "line") {
@@ -2219,6 +2310,8 @@
         lt = "bylayer";
         lw = "bylayer";
         dimtxt = 2.5;
+        dimprec = 2;
+        texth = 2.5;
         prec = 4;
         /** DXF $INSUNITS. 0 unitless, 1 inches, 4 mm, 5 cm, 6 m. */
         units = 4;
@@ -2277,6 +2370,8 @@
                 lt: this.lt,
                 lw: this.lw,
                 dimtxt: this.dimtxt,
+                dimprec: this.dimprec,
+                texth: this.texth,
                 prec: this.prec,
                 units: this.units,
                 fillet: this.fillet,
@@ -2290,6 +2385,11 @@
             this.order = [];
             let maxId = 1;
             for (const e of s.ents) {
+                if (e.type === "dim" && e.dim.th === undefined) {
+                    // Older drawings drew every dimension with the document-wide height.
+                    e.dim.th = s.dimtxt ?? 2.5;
+                    e.dim.prec = e.dim.prec ?? 2;
+                }
                 this.ents.set(e.id, (0, entities_ts_1.cloneEnt)(e));
                 this.order.push(e.id);
                 const n = parseInt(e.id, 36);
@@ -2307,6 +2407,8 @@
             this.lt = s.lt;
             this.lw = s.lw;
             this.dimtxt = s.dimtxt;
+            this.dimprec = s.dimprec ?? 2;
+            this.texth = s.texth ?? 2.5;
             this.prec = s.prec;
             this.units = s.units;
             this.fillet = s.fillet;
@@ -2317,7 +2419,14 @@
         }
         transact(fn) {
             const before = this.snapshot();
-            fn();
+            try {
+                fn();
+            }
+            catch (err) {
+                // Do not leave a half-applied edit behind.
+                this.restore(before);
+                throw err;
+            }
             const after = JSON.stringify(this.snapshot());
             if (JSON.stringify(before) === after)
                 return false;
@@ -2541,6 +2650,7 @@
         };
         push("0", "SECTION", "2", "HEADER");
         push("9", "$ACADVER", "1", "AC1015");
+        push("9", "$HANDSEED", "5", "FFFF");
         push("9", "$INSUNITS", "70", String(doc.units));
         push("9", "$LTSCALE", "40", num(doc.ltscale));
         push("9", "$CLAYER", "8", doc.currentLayer);
@@ -2569,12 +2679,24 @@
             push("2", layer.name, "70", String(flags), "62", String(col), "6", layer.lt.toUpperCase(), "370", String(Math.round(layer.lw * 100)));
         }
         push("0", "ENDTAB");
+        push("0", "TABLE", "2", "APPID", "5", hx(), "100", "AcDbSymbolTable", "70", "1");
+        push("0", "APPID", "5", hx(), "100", "AcDbSymbolTableRecord", "100", "AcDbRegAppTableRecord", "2", "ACAD", "70", "0");
+        push("0", "ENDTAB");
+        const recNames = ["*Model_Space", "*Paper_Space", ...[...doc.blocks.values()].map((bl) => bl.name)];
+        push("0", "TABLE", "2", "BLOCK_RECORD", "5", hx(), "100", "AcDbSymbolTable", "70", String(recNames.length));
+        for (const rn of recNames)
+            push("0", "BLOCK_RECORD", "5", hx(), "100", "AcDbSymbolTableRecord", "100", "AcDbBlockTableRecord", "2", rn);
+        push("0", "ENDTAB");
         push("0", "TABLE", "2", "STYLE", "5", hx(), "100", "AcDbSymbolTable", "70", "1");
         push("0", "STYLE", "5", hx(), "100", "AcDbSymbolTableRecord", "100", "AcDbTextStyleTableRecord");
         push("2", "STANDARD", "70", "0", "40", "0", "41", "1", "50", "0", "71", "0", "42", "2.5", "3", "txt", "4", "");
         push("0", "ENDTAB");
         push("0", "ENDSEC");
         push("0", "SECTION", "2", "BLOCKS");
+        for (const sp of ["*Model_Space", "*Paper_Space"]) {
+            push("0", "BLOCK", "5", hx(), "100", "AcDbEntity", "8", "0", "100", "AcDbBlockBegin", "2", sp, "70", "0", "10", "0", "20", "0", "30", "0", "3", sp, "1", "");
+            push("0", "ENDBLK", "5", hx(), "100", "AcDbEntity", "8", "0", "100", "AcDbBlockEnd");
+        }
         for (const block of doc.blocks.values()) {
             push("0", "BLOCK", "5", hx(), "100", "AcDbEntity", "8", "0", "100", "AcDbBlockBegin");
             push("2", block.name, "70", "0", "10", num(block.base.x), "20", num(block.base.y), "30", "0", "3", block.name, "1", "");
@@ -2641,15 +2763,11 @@
                 return;
             }
             case "spline": {
-                // Portable approximation — true fit-point splines need knot vectors many readers reject.
-                const pts = e.pts;
-                writePolyline(out, {
-                    ...e,
-                    type: "polyline",
-                    pts: pts.map((p) => ({ x: p.x, y: p.y })),
-                    closed: false,
-                    width: 0,
-                });
+                pushEntHead(out, "SPLINE", e);
+                push("100", "AcDbSpline", "210", "0", "220", "0", "230", "1", "70", "1064", "71", "3", "72", "0", "73", "0", "74", String(e.pts.length));
+                push("42", "1e-07", "43", "1e-07", "44", "1e-10");
+                for (const p of e.pts)
+                    push("11", num(p.x), "21", num(p.y), "31", "0");
                 return;
             }
             case "xline":
@@ -2715,13 +2833,13 @@
         };
         const body = e.text.replace(/\n/g, "\\P");
         pushEntHead(out, "MTEXT", e);
-        push("100", "AcDbMText", "10", num(e.p.x), "20", num(e.p.y), "30", "0");
+        push("100", "AcDbMText", "10", num(e.p.x - Math.sin(e.rot) * e.h), "20", num(e.p.y + Math.cos(e.rot) * e.h), "30", "0");
         push("40", num(e.h), "41", num(Math.max(e.h, e.text.length * e.h * 0.6)));
         const chunks = body.match(/[\s\S]{1,250}/g) ?? [""];
         for (let i = 0; i < chunks.length - 1; i++)
             push("3", chunks[i]);
         push("1", chunks[chunks.length - 1] ?? "");
-        push("50", num((e.rot * 180) / Math.PI), "71", e.align === "center" ? "5" : e.align === "right" ? "6" : "1");
+        push("50", num((e.rot * 180) / Math.PI), "71", e.align === "center" ? "2" : e.align === "right" ? "3" : "1");
     }
     function writeHatch(out, e) {
         const push = (...a) => {
@@ -2825,6 +2943,33 @@
                 bag.push(pairs[i++]);
             return { type, bag };
         };
+        const readLegacyPolyline = (rec) => {
+            const verts = [];
+            const closed = (f(bagGet(rec.bag, 70)[0] ?? "0") & 1) !== 0;
+            const common = commonStyle(rec.bag);
+            while (i < pairs.length) {
+                const peek = pairs[i];
+                if (peek.c !== 0)
+                    break;
+                const nt = peek.v.trim().toUpperCase();
+                if (nt === "SEQEND") {
+                    readBag();
+                    break;
+                }
+                if (nt !== "VERTEX")
+                    break;
+                const vr = readBag();
+                if (!vr)
+                    break;
+                const x = f(bagGet(vr.bag, 10)[0] ?? "0");
+                const y = f(bagGet(vr.bag, 20)[0] ?? "0");
+                const b = f(bagGet(vr.bag, 42)[0] ?? "0");
+                verts.push(b ? { x, y, b } : { x, y });
+            }
+            if (verts.length < 2)
+                return null;
+            return { ...common, id: takeId(), type: "polyline", pts: verts, closed, width: f(bagGet(rec.bag, 40)[0] ?? "0") };
+        };
         while (i < pairs.length) {
             const rec = readBag();
             if (!rec)
@@ -2870,7 +3015,7 @@
                 const name = (bagGet(rec.bag, 2)[0] ?? "").trim();
                 const base = { x: f(bagGet(rec.bag, 10)[0] ?? "0"), y: f(bagGet(rec.bag, 20)[0] ?? "0") };
                 const ents = [];
-                if (name.startsWith("*")) {
+                if (/^\*(model_space|paper_space)/i.test(name)) {
                     while (i < pairs.length) {
                         const peek = pairs[i];
                         if (peek.c === 0 && peek.v.trim().toUpperCase() === "ENDBLK") {
@@ -2890,57 +3035,41 @@
                     const er = readBag();
                     if (!er)
                         break;
+                    if (er.type.toUpperCase() === "POLYLINE") {
+                        const poly = readLegacyPolyline(er);
+                        if (poly)
+                            ents.push(poly);
+                        continue;
+                    }
+                    if (er.type.toUpperCase() === "DIMENSION") {
+                        const dref = bagGet(er.bag, 2)[0];
+                        if (dref && blocks.has(dref.trim().toLowerCase())) {
+                            ents.push({ ...commonStyle(er.bag), id: takeId(), type: "insert", name: dref.trim(), p: { x: 0, y: 0 }, sx: 1, sy: 1, rot: 0 });
+                            continue;
+                        }
+                    }
                     const ent = entityFrom(er.type, er.bag, takeId, warnings);
                     if (ent)
                         ents.push(ent);
-                    else if (er.type.toUpperCase() === "POLYLINE") {
-                        const poly = readLegacyPoly(er.bag, takeId, warnings, () => {
-                            const vr = readBag();
-                            return vr;
-                        });
-                        // readLegacyPoly consumes VERTEX via callback incorrectly. Handle below.
-                        void poly;
-                    }
                 }
                 if (name)
-                    blocks.set(name.toLowerCase(), { name, base, ents });
+                    blocks.set(name.toLowerCase(), { name, base, ents: /^\*d/i.test(name) ? ents.filter((en) => en.type !== "point") : ents });
                 continue;
             }
             if (section === "ENTITIES") {
                 if (t === "POLYLINE") {
-                    const verts = [];
-                    let closed = (f(bagGet(rec.bag, 70)[0] ?? "0") & 1) !== 0;
-                    const common = commonStyle(rec.bag);
-                    while (i < pairs.length) {
-                        const peek = pairs[i];
-                        if (peek.c !== 0)
-                            break;
-                        const nt = peek.v.trim().toUpperCase();
-                        if (nt === "SEQEND") {
-                            readBag();
-                            break;
-                        }
-                        if (nt !== "VERTEX")
-                            break;
-                        const vr = readBag();
-                        if (!vr)
-                            break;
-                        const x = f(bagGet(vr.bag, 10)[0] ?? "0");
-                        const y = f(bagGet(vr.bag, 20)[0] ?? "0");
-                        const b = f(bagGet(vr.bag, 42)[0] ?? "0");
-                        verts.push(b ? { x, y, b } : { x, y });
-                    }
-                    if (verts.length >= 2) {
-                        entities.push({
-                            ...common,
-                            id: takeId(),
-                            type: "polyline",
-                            pts: verts,
-                            closed,
-                            width: f(bagGet(rec.bag, 40)[0] ?? "0"),
-                        });
-                    }
+                    const poly = readLegacyPolyline(rec);
+                    if (poly)
+                        entities.push(poly);
                     continue;
+                }
+                if (t === "DIMENSION") {
+                    // Dimensions carry their drawn geometry in an anonymous block: keep that, it is exactly what the source CAD showed.
+                    const dref = (bagGet(rec.bag, 2)[0] ?? "").trim();
+                    if (dref && blocks.has(dref.toLowerCase())) {
+                        entities.push({ ...commonStyle(rec.bag), id: takeId(), type: "insert", name: dref, p: { x: 0, y: 0 }, sx: 1, sy: 1, rot: 0 });
+                        continue;
+                    }
                 }
                 const ent = entityFrom(rec.type, rec.bag, takeId, warnings);
                 if (ent)
@@ -3063,25 +3192,45 @@
         if (t === "LINE") {
             return { ...st, id: id(), type: "line", a: { x: x(10), y: x(20) }, b: { x: x(11), y: x(21) } };
         }
+        const flip = x(230) < 0 ? -1 : 1; // extrusion toward -Z mirrors the OCS in X
         if (t === "CIRCLE") {
             const r = x(40);
             if (r <= 0)
                 return null;
-            return { ...st, id: id(), type: "circle", c: { x: x(10), y: x(20) }, r };
+            return { ...st, id: id(), type: "circle", c: { x: flip * x(10), y: x(20) }, r };
         }
         if (t === "ARC") {
             const r = x(40);
             if (r <= 0)
                 return null;
-            const a0 = (x(50) * Math.PI) / 180;
-            const a1 = (x(51) * Math.PI) / 180;
-            return { ...st, id: id(), type: "arc", c: { x: x(10), y: x(20) }, r, a0, sweep: (0, math_ts_1.ccwSweep)(a0, a1) };
+            let a0 = (x(50) * Math.PI) / 180;
+            let a1 = (x(51) * Math.PI) / 180;
+            if (flip < 0) {
+                const n0 = Math.PI - a1;
+                const n1 = Math.PI - a0;
+                a0 = n0;
+                a1 = n1;
+            }
+            return { ...st, id: id(), type: "arc", c: { x: flip * x(10), y: x(20) }, r, a0, sweep: (0, math_ts_1.ccwSweep)(a0, a1) };
         }
         if (t === "POINT")
-            return { ...st, id: id(), type: "point", p: { x: x(10), y: x(20) } };
-        if (t === "LWPOLYLINE") {
-            const closed = (f(bagGet(bag, 70)[0] ?? "0") & 1) !== 0;
-            const width = f(bagGet(bag, 43)[0] ?? "0");
+            return { ...st, id: id(), type: "point", p: { x: flip * x(10), y: x(20) } };
+        if (t === "SOLID" || t === "TRACE") {
+            const P = (k) => ({ x: flip * x(10 + k), y: x(20 + k) });
+            const c = [P(0), P(1), P(3), P(2)];
+            const pts = c.filter((p, k) => k === 0 || Math.hypot(p.x - c[k - 1].x, p.y - c[k - 1].y) > 1e-12);
+            if (pts.length < 3)
+                return null;
+            return { ...st, id: id(), type: "hatch", loops: [{ pts, closed: true }], pattern: "SOLID", scale: 1, angle: 0, solid: true };
+        }
+        if (t === "3DFACE") {
+            const c = [0, 1, 2, 3].map((k) => ({ x: x(10 + k), y: x(20 + k) }));
+            const pts = c.filter((p, k) => k === 0 || Math.hypot(p.x - c[k - 1].x, p.y - c[k - 1].y) > 1e-12);
+            if (pts.length < 3)
+                return null;
+            return { ...st, id: id(), type: "polyline", pts, closed: true, width: 0 };
+        }
+        if (t === "LEADER") {
             const pts = [];
             let cur = null;
             for (const p of bag) {
@@ -3092,10 +3241,30 @@
                 }
                 else if (p.c === 20 && cur)
                     cur.y = f(p.v);
+            }
+            if (cur)
+                pts.push(cur);
+            if (pts.length < 2)
+                return null;
+            return { ...st, id: id(), type: "polyline", pts, closed: false, width: 0 };
+        }
+        if (t === "LWPOLYLINE") {
+            const closed = (f(bagGet(bag, 70)[0] ?? "0") & 1) !== 0;
+            const width = f(bagGet(bag, 43)[0] ?? "0");
+            const pts = [];
+            let cur = null;
+            for (const p of bag) {
+                if (p.c === 10) {
+                    if (cur)
+                        pts.push(cur);
+                    cur = { x: flip * f(p.v), y: 0 };
+                }
+                else if (p.c === 20 && cur)
+                    cur.y = f(p.v);
                 else if (p.c === 42 && cur) {
                     const b = f(p.v);
                     if (Math.abs(b) > 1e-12)
-                        cur.b = b;
+                        cur.b = flip * b;
                 }
             }
             if (cur)
@@ -3118,10 +3287,16 @@
         if (t === "MTEXT") {
             const parts = [...bag.filter((p) => p.c === 3).map((p) => p.v), ...bag.filter((p) => p.c === 1).map((p) => p.v)];
             const h = x(40) || 2.5;
-            const rot = (x(50) * Math.PI) / 180;
+            const hasDir = bag.some((p) => p.c === 11);
+            const rot = hasDir ? Math.atan2(x(21), x(11)) : (x(50) * Math.PI) / 180;
             const att = f(bagGet(bag, 71)[0] ?? "1");
             const align = att === 2 || att === 5 || att === 8 ? "center" : att === 3 || att === 6 || att === 9 ? "right" : "left";
-            return { ...st, id: id(), type: "text", p: { x: x(10), y: x(20) }, h, rot, text: decodeText(parts.join("")), align };
+            const body = decodeText(parts.join(""));
+            const nLines = body.split("\n").length;
+            // MTEXT is anchored at its box; Northline text is anchored at the first baseline.
+            const drop = att <= 3 ? h : att <= 6 ? h - (nLines * h * 1.25) / 2 + h * 0.25 : -(nLines - 1) * h * 1.25;
+            const p = { x: x(10) + Math.sin(rot) * drop, y: x(20) - Math.cos(rot) * drop };
+            return { ...st, id: id(), type: "text", p, h, rot, text: body, align };
         }
         if (t === "ELLIPSE") {
             const mx = x(11);
@@ -3137,6 +3312,8 @@
         if (t === "SPLINE") {
             const fit = [];
             const ctrl = [];
+            const knots = [];
+            const weights = [];
             let mode = "none";
             let cur = null;
             const flush = () => {
@@ -3161,8 +3338,18 @@
                 }
                 else if ((p.c === 20 || p.c === 21) && cur)
                     cur.y = f(p.v);
+                else if (p.c === 40)
+                    knots.push(f(p.v));
+                else if (p.c === 41)
+                    weights.push(f(p.v));
             }
             flush();
+            const degree = f(bagGet(bag, 71)[0] ?? "3") || 3;
+            if (ctrl.length >= degree + 1 && knots.length === ctrl.length + degree + 1) {
+                const pts = sampleBSpline(degree, knots, ctrl, weights);
+                if (pts.length >= 2)
+                    return { ...st, id: id(), type: "spline", pts };
+            }
             const pts = fit.length >= 2 ? fit : ctrl;
             if (pts.length < 2)
                 return null;
@@ -3175,7 +3362,7 @@
         }
         if (t === "INSERT") {
             const name = (bagGet(bag, 2)[0] ?? "").trim();
-            if (!name || name.startsWith("*"))
+            if (!name || (name.startsWith("*") && !/^\*[du]/i.test(name)))
                 return null;
             return {
                 ...st,
@@ -3204,7 +3391,149 @@
             return dimensionFrom(bag, id);
         return null;
     }
+    function sampleBSpline(p, U, P, W) {
+        const n = P.length - 1;
+        const rational = W.length === P.length;
+        const t0 = U[p];
+        const t1 = U[n + 1];
+        if (!(t1 > t0))
+            return [];
+        const spans = Math.max(1, n - p + 1);
+        const N = Math.min(600, Math.max(24, spans * 18));
+        const out = [];
+        for (let s = 0; s <= N; s++) {
+            const t = Math.min(t1 - 1e-12 * (t1 - t0), t0 + ((t1 - t0) * s) / N);
+            let k = p;
+            while (k < n && t >= U[k + 1])
+                k++;
+            const d = [];
+            for (let j = 0; j <= p; j++) {
+                const w = rational ? W[j + k - p] : 1;
+                d.push({ x: P[j + k - p].x * w, y: P[j + k - p].y * w, w });
+            }
+            for (let r = 1; r <= p; r++) {
+                for (let j = p; j >= r; j--) {
+                    const den = U[j + 1 + k - r] - U[j + k - p];
+                    const a = den === 0 ? 0 : (t - U[j + k - p]) / den;
+                    d[j] = {
+                        x: (1 - a) * d[j - 1].x + a * d[j].x,
+                        y: (1 - a) * d[j - 1].y + a * d[j].y,
+                        w: (1 - a) * d[j - 1].w + a * d[j].w,
+                    };
+                }
+            }
+            const q = d[p];
+            if (q.w)
+                out.push({ x: q.x / q.w, y: q.y / q.w });
+        }
+        return out;
+    }
     function readHatchLoops(bag) {
+        const loops = [];
+        let i = bag.findIndex((q) => q.c === 91);
+        if (i < 0)
+            return legacyHatchLoops(bag);
+        const nLoops = f(bag[i].v);
+        i++;
+        for (let li = 0; li < nLoops && i < bag.length; li++) {
+            while (i < bag.length && bag[i].c !== 92)
+                i++;
+            if (i >= bag.length)
+                break;
+            const flags = f(bag[i].v);
+            i++;
+            if (flags & 2) {
+                let hasBulge = false;
+                let count = 0;
+                while (i < bag.length && bag[i].c !== 93) {
+                    if (bag[i].c === 72)
+                        hasBulge = f(bag[i].v) !== 0;
+                    i++;
+                }
+                count = f(bag[i]?.v ?? "0");
+                i++;
+                const pts = [];
+                while (i < bag.length && pts.length < count) {
+                    if (bag[i].c === 10) {
+                        const q = { x: f(bag[i].v), y: 0 };
+                        i++;
+                        if (bag[i]?.c === 20) {
+                            q.y = f(bag[i].v);
+                            i++;
+                        }
+                        if (hasBulge && bag[i]?.c === 42) {
+                            const b = f(bag[i].v);
+                            if (Math.abs(b) > 1e-12)
+                                q.b = b;
+                            i++;
+                        }
+                        pts.push(q);
+                    }
+                    else
+                        i++;
+                }
+                if (pts.length >= 3)
+                    loops.push({ pts, closed: true });
+            }
+            else {
+                const nEdges = f(bag[i]?.v ?? "0");
+                i++;
+                const pts = [];
+                let circle = null;
+                for (let ei = 0; ei < nEdges && i < bag.length; ei++) {
+                    while (i < bag.length && bag[i].c !== 72)
+                        i++;
+                    const type = f(bag[i]?.v ?? "0");
+                    i++;
+                    const vals = {};
+                    while (i < bag.length && ![72, 97, 92, 75, 76].includes(bag[i].c)) {
+                        vals[bag[i].c] = f(bag[i].v);
+                        i++;
+                    }
+                    if (type === 1)
+                        pts.push({ x: vals[10] ?? 0, y: vals[20] ?? 0 });
+                    else if (type === 2) {
+                        const c = { x: vals[10] ?? 0, y: vals[20] ?? 0 };
+                        const r = vals[40] ?? 0;
+                        const a0 = ((vals[50] ?? 0) * Math.PI) / 180;
+                        const a1 = ((vals[51] ?? 360) * Math.PI) / 180;
+                        const ccw = (vals[73] ?? 1) !== 0;
+                        let sweep = ccw ? (0, math_ts_1.ccwSweep)(a0, a1) : -(0, math_ts_1.ccwSweep)(a1, a0);
+                        if (Math.abs(a1 - a0) >= Math.PI * 2 - 1e-6 && nEdges === 1) {
+                            circle = { circle: { c, r } };
+                            break;
+                        }
+                        if (Math.abs(sweep) < 1e-9)
+                            sweep = Math.PI * 2;
+                        const start = ccw ? a0 : a0;
+                        pts.push({ x: c.x + Math.cos(start) * r, y: c.y + Math.sin(start) * r, b: Math.tan(sweep / 4) });
+                    }
+                    else if (type === 3) {
+                        // elliptical arc edge: approximate with samples
+                        const c = { x: vals[10] ?? 0, y: vals[20] ?? 0 };
+                        const mx = vals[11] ?? 1;
+                        const my = vals[21] ?? 0;
+                        const ratio = vals[40] ?? 1;
+                        const a0 = ((vals[50] ?? 0) * Math.PI) / 180;
+                        let a1 = ((vals[51] ?? 360) * Math.PI) / 180;
+                        if (a1 <= a0)
+                            a1 += Math.PI * 2;
+                        const L = Math.hypot(mx, my) || 1;
+                        for (let k = 0; k < 24; k++) {
+                            const a = a0 + ((a1 - a0) * k) / 24;
+                            pts.push({ x: c.x + Math.cos(a) * mx - Math.sin(a) * (my / L) * L * ratio, y: c.y + Math.cos(a) * my + Math.sin(a) * (mx / L) * L * ratio });
+                        }
+                    }
+                }
+                if (circle)
+                    loops.push(circle);
+                else if (pts.length >= 3)
+                    loops.push({ pts, closed: true });
+            }
+        }
+        return loops;
+    }
+    function legacyHatchLoops(bag) {
         const loops = [];
         // Walk looking for boundary vertex runs (group 93 count followed by 10/20).
         for (let i = 0; i < bag.length; i++) {
@@ -3340,7 +3669,13 @@
         nearest: 9,
     };
     function findSnap(doc, index, cursor, aperture, modes, from) {
-        const near = index.near(doc, cursor, aperture * 4).filter((e) => (0, entities_ts_1.snapEligible)(e, doc.layers)).slice(0, 40);
+        const near = index
+            .near(doc, cursor, aperture * 4)
+            .filter((e) => (0, entities_ts_1.snapEligible)(e, doc.layers))
+            .map((e) => ({ e, d: (0, entities_ts_1.hitDist)(e, cursor, doc.ctx()) }))
+            .sort((a, b) => a.d - b.d)
+            .slice(0, 40)
+            .map((x) => x.e);
         const hits = [];
         const push = (p, kind) => {
             if (!modes[kind])
@@ -3428,7 +3763,12 @@
         }
         if (!hits.length)
             return null;
-        hits.sort((a, b) => a.priority - b.priority || (0, math_ts_1.dist)(a.p, cursor) - (0, math_ts_1.dist)(b.p, cursor));
+        const eps = aperture * 0.05;
+        hits.sort((a, b) => {
+            const da = (0, math_ts_1.dist)(a.p, cursor);
+            const db = (0, math_ts_1.dist)(b.p, cursor);
+            return Math.abs(da - db) > eps ? da - db : a.priority - b.priority;
+        });
         return hits[0] ?? null;
     }
     function perpendicular(from, c) {
@@ -3909,7 +4249,7 @@
         ctx.textAlign = e.align;
         ctx.textBaseline = "alphabetic";
         const lines = e.text.split("\n");
-        lines.forEach((line, i) => ctx.fillText(line, 0, -i * size * 1.25));
+        lines.forEach((line, i) => ctx.fillText(line, 0, i * size * 1.25));
         ctx.restore();
     }
     function drawHatch(ctx, view, e, color) {
@@ -4005,7 +4345,8 @@
         return { x: a.x * s, y: a.y * s };
     }
     function drawDim(ctx, view, doc, e, color, theme) {
-        const h = doc.dimtxt;
+        const h = e.dim.th ?? doc.dimtxt;
+        const dprec = Math.max(0, Math.min(8, e.dim.prec ?? 2));
         ctx.save();
         ctx.strokeStyle = color;
         ctx.fillStyle = color;
@@ -4035,7 +4376,7 @@
             arrow(ctx, view, tip, (0, math_ts_1.norm)((0, math_ts_1.sub)(tip, e.dim.c)), h * 0.7);
             if (e.dim.dia)
                 arrow(ctx, view, tail, (0, math_ts_1.norm)((0, math_ts_1.sub)(tail, e.dim.c)), h * 0.7);
-            const label = `${e.dim.dia ? "Ø" : "R"}${trimNum(e.dim.dia ? e.dim.r * 2 : e.dim.r, doc.prec)}`;
+            const label = `${e.dim.dia ? "Ø" : "R"}${(e.dim.dia ? e.dim.r * 2 : e.dim.r).toFixed(dprec)}`;
             drawText(ctx, view, { ...e, type: "text", p: addPt(tip, { x: h * 0.4, y: h * 0.4 }), h, rot: 0, text: label, align: "left" }, color);
         }
         else {
@@ -4049,7 +4390,7 @@
             arrow(ctx, view, s, (0, math_ts_1.norm)({ x: Math.sin(e.dim.a0), y: -Math.cos(e.dim.a0) }), h * 0.65);
             arrow(ctx, view, t, (0, math_ts_1.norm)({ x: -Math.sin(e.dim.a0 + sweep), y: Math.cos(e.dim.a0 + sweep) }), h * 0.65);
             const mid = (0, geom_ts_1.arcPoint)(e.dim.c, e.dim.r + h * 0.4, e.dim.a0 + sweep / 2);
-            drawText(ctx, view, { ...e, type: "text", p: mid, h, rot: 0, text: `${trimNum((sweep * 180) / Math.PI, 2)}°`, align: "center" }, color);
+            drawText(ctx, view, { ...e, type: "text", p: mid, h, rot: 0, text: `${((sweep * 180) / Math.PI).toFixed(Math.min(dprec, 2))}°`, align: "center" }, color);
         }
         ctx.restore();
         void theme;
@@ -4229,6 +4570,8 @@
         doc.lw = "bylayer";
         doc.ltscale = 1;
         doc.dimtxt = 3.4;
+        doc.dimprec = 2;
+        doc.texth = 3.2;
         doc.prec = 2;
         doc.units = 4;
         doc.fillet = 6;
@@ -4297,17 +4640,17 @@
         doc.add(S({
             type: "dim",
             layer: "Dim",
-            dim: { kind: "linear", axis: "h", p1: { x: 0, y: 0 }, p2: { x: 180, y: 0 }, loc: { x: 90, y: -16 } },
+            dim: { kind: "linear", axis: "h", p1: { x: 0, y: 0 }, p2: { x: 180, y: 0 }, loc: { x: 90, y: -16 }, th: 3.4, prec: 2 },
         }));
         doc.add(S({
             type: "dim",
             layer: "Dim",
-            dim: { kind: "linear", axis: "v", p1: { x: 180, y: 0 }, p2: { x: 180, y: 110 }, loc: { x: 198, y: 55 } },
+            dim: { kind: "linear", axis: "v", p1: { x: 180, y: 0 }, p2: { x: 180, y: 110 }, loc: { x: 198, y: 55 }, th: 3.4, prec: 2 },
         }));
         doc.add(S({
             type: "dim",
             layer: "Dim",
-            dim: { kind: "radial", c: { x: 90, y: 55 }, r: 16, ang: Math.PI / 4, dia: true },
+            dim: { kind: "radial", c: { x: 90, y: 55 }, r: 16, ang: Math.PI / 4, dia: true, th: 3.4, prec: 2 },
         }));
         doc.add(S({ type: "text", layer: "Text", p: { x: 0, y: 122 }, h: 6, rot: 0, text: "NORTHLINE", align: "left" }));
         doc.add(S({
@@ -4344,6 +4687,9 @@
     function isAbort(e) {
         return e instanceof AbortCmd;
     }
+    function dist(a, b) {
+        return (0, math_ts_1.dist)(a, b);
+    }
     async function line(io) {
         io.ensureDraw();
         const first = await io.point("Specify first point:");
@@ -4351,33 +4697,49 @@
             return;
         let prev = first.p;
         const made = [];
-        while (true) {
-            const nxt = await io.point("Specify next point or [Undo]:", {
-                base: prev,
-                keywords: [{ name: "Undo", aliases: ["u"] }],
-                preview: (c) => [io.make({ type: "line", a: prev, b: c })],
-            });
-            if (nxt.t === "none")
-                break;
-            if (nxt.t === "kw") {
-                made.pop();
-                prev = made.length && made[made.length - 1].type === "line" ? made[made.length - 1].b : first.p;
-                io.preview(null);
-                continue;
-            }
-            if (nxt.t !== "point")
+        const commit = () => {
+            if (!made.length)
                 return;
-            if ((0, math_ts_1.dist)(prev, nxt.p) < 1e-9)
-                continue;
-            made.push(io.make({ type: "line", a: prev, b: nxt.p }));
-            prev = nxt.p;
-            io.preview(made);
+            const batch = made.splice(0, made.length);
+            io.transact(() => batch.forEach((e) => io.doc.add(e)));
+        };
+        try {
+            while (true) {
+                const nxt = await io.point(made.length > 1 ? "Specify next point or [Close/Undo]:" : "Specify next point or [Undo]:", {
+                    base: prev,
+                    keywords: made.length > 1
+                        ? [{ name: "Close", aliases: ["c"] }, { name: "Undo", aliases: ["u"] }]
+                        : [{ name: "Undo", aliases: ["u"] }],
+                    preview: (c) => [...made, io.make({ type: "line", a: prev, b: c })],
+                });
+                if (nxt.t === "none")
+                    break;
+                if (nxt.t === "kw") {
+                    if (nxt.name === "Close") {
+                        if (dist(prev, first.p) > 1e-9)
+                            made.push(io.make({ type: "line", a: prev, b: first.p }));
+                        break;
+                    }
+                    made.pop();
+                    prev = made.length ? made[made.length - 1].b : first.p;
+                    io.preview(made);
+                    continue;
+                }
+                if (nxt.t !== "point")
+                    break;
+                if (dist(prev, nxt.p) < 1e-9)
+                    continue;
+                made.push(io.make({ type: "line", a: prev, b: nxt.p }));
+                prev = nxt.p;
+                io.preview(made);
+            }
+        }
+        catch (err) {
+            commit();
+            throw err;
         }
         io.preview(null);
-        if (!made.length)
-            return;
-        io.transact(() => made.forEach((e) => io.doc.add(e)));
-        io.setSelection(made.map((e) => e.id));
+        commit();
     }
     async function pline(io) {
         io.ensureDraw();
@@ -4387,6 +4749,7 @@
         const pts = [{ ...first.p }];
         let arcMode = false;
         let dir = null;
+        try {
         while (true) {
             const msg = arcMode ? "Specify endpoint of arc or [Line/Undo/Close]:" : "Specify next point or [Arc/Undo/Close]:";
             const kws = arcMode
@@ -4431,7 +4794,6 @@
                     if (pts.length >= 2) {
                         const ent = io.make({ type: "polyline", pts, closed: true, width: 0 });
                         io.transact(() => io.doc.add(ent));
-                        io.setSelection([ent.id]);
                     }
                     io.preview(null);
                     return;
@@ -4461,12 +4823,17 @@
             else
                 dir = incoming;
         }
+        }
+        catch (err) {
+            if (err instanceof AbortCmd && pts.length >= 2)
+                io.transact(() => io.doc.add(io.make({ type: "polyline", pts, closed: false, width: 0 })));
+            throw err;
+        }
         io.preview(null);
         if (pts.length < 2)
             return;
         const ent = io.make({ type: "polyline", pts, closed: false, width: 0 });
         io.transact(() => io.doc.add(ent));
-        io.setSelection([ent.id]);
     }
     function tangentBulge(prev, dir, next) {
         const chord = (0, math_ts_1.sub)(next, prev);
@@ -4633,9 +5000,9 @@
             const dir = (0, math_ts_1.norm)((0, math_ts_1.sub)(end.p, a.p));
             const nrm = { x: -dir.y, y: dir.x };
             const h = r * Math.cos(theta / 2);
-            const sign = deg >= 0 ? 1 : -1;
-            const center = { x: mid.x + nrm.x * h * sign, y: mid.y + nrm.y * h * sign };
-            // This center formula is easy to get backwards; prefer 3-point via a constructed mid.
+            // A counter-clockwise arc from start to end bulges to the right of the chord (negative normal).
+            const sign = deg >= 0 ? -1 : 1;
+            const center = { x: mid.x - nrm.x * h * sign, y: mid.y - nrm.y * h * sign };
             const built = (0, geom_ts_1.arcThrough)(a.p, { x: mid.x + nrm.x * (r - h) * sign, y: mid.y + nrm.y * (r - h) * sign }, end.p);
             const use = built ?? { c: center, r: Math.abs(r), a0: Math.atan2(a.p.y - center.y, a.p.x - center.x), sweep: theta };
             io.transact(() => io.doc.add(io.make({ type: "arc", c: use.c, r: use.r, a0: use.a0, sweep: use.sweep })));
@@ -4717,7 +5084,7 @@
         const r = await io.point(inscribed ? "Specify radius:" : "Specify radius of circle:", {
             base: c.p,
             acceptNumber: true,
-            preview: (p) => [io.make({ type: "polyline", closed: true, width: 0, pts: polyPts(c.p, (0, math_ts_1.dist)(c.p, p), sides, Math.atan2(p.y - c.p.y, p.x - c.p.x), inscribed) })],
+            preview: (p) => [io.make({ type: "polyline", closed: true, width: 0, pts: polyPts(c.p, (0, math_ts_1.dist)(c.p, p), sides, Math.atan2(p.y - c.p.y, p.x - c.p.x) - (inscribed ? 0 : Math.PI / sides), inscribed) })],
         });
         let radius = 0;
         let rot = 0;
@@ -4731,6 +5098,8 @@
             return;
         if (radius <= 1e-9)
             return;
+        if (!inscribed)
+            rot -= Math.PI / sides;
         io.transact(() => io.doc.add(io.make({ type: "polyline", closed: true, width: 0, pts: polyPts(c.p, radius, sides, rot, inscribed) })));
     }
     function polyPts(c, radius, sides, rot, inscribed) {
@@ -4805,12 +5174,12 @@
         const p = await io.point("Specify start point of text:");
         if (p.t !== "point")
             return;
-        const hAns = await io.point(`Specify height <${io.doc.dimtxt}>:`, {
+        const hAns = await io.point(`Specify height <${io.doc.texth}>:`, {
             base: p.p,
             acceptNumber: true,
             preview: (c) => [io.make({ type: "text", p: p.p, h: Math.max(0.1, (0, math_ts_1.dist)(p.p, c)), rot: 0, text: "Text", align: "left" })],
         });
-        let h = io.doc.dimtxt;
+        let h = io.doc.texth;
         if (hAns.t === "num")
             h = hAns.v;
         else if (hAns.t === "point")
@@ -4818,10 +5187,11 @@
         else if (hAns.t !== "none")
             return;
         h = Math.max(1e-4, h);
-        io.doc.dimtxt = h;
+        io.doc.texth = h;
         const rAns = await io.number("Specify rotation angle of text <0>:", { def: 0 });
         const rot = ((rAns.t === "num" ? rAns.v : 0) * Math.PI) / 180;
-        const str = await io.text("Enter text:");
+        const raw = await io.text("Enter text (\\n or \\P starts a new line):");
+        const str = raw.replace(/\\[nP]/g, "\n");
         if (!str.trim())
             return;
         io.transact(() => io.doc.add(io.make({ type: "text", p: p.p, h, rot, text: str, align: "left" })));
@@ -4829,6 +5199,7 @@
     async function spline(io) {
         io.ensureDraw();
         const pts = [];
+        try {
         while (true) {
             const p = await io.point(pts.length ? "Specify next fit point or [Undo]:" : "Specify first fit point:", {
                 base: pts[pts.length - 1] ?? null,
@@ -4844,6 +5215,12 @@
             if (p.t !== "point")
                 return;
             pts.push(p.p);
+        }
+        }
+        catch (err) {
+            if (err instanceof AbortCmd && pts.length >= 2)
+                io.transact(() => io.doc.add(io.make({ type: "spline", pts })));
+            throw err;
         }
         io.preview(null);
         if (pts.length < 2)
@@ -4910,40 +5287,46 @@
             for (const e of ents) {
                 const loop = loopOf(e);
                 if (loop)
-                    loops.push({ ent: e, loop });
+                    loops.push(loop);
                 else
                     io.info("Skipped an open object.");
             }
         }
         else {
-            const p = await io.point("Pick internal point:");
-            if (p.t !== "point")
-                return;
-            const found = smallestContainer(io.doc, p.p);
-            if (!found) {
-                io.info("No closed boundary contains that point.");
-                return;
+            while (true) {
+                const p = await io.point(loops.length ? "Pick another internal point (Enter to finish):" : "Pick internal point:");
+                if (p.t !== "point")
+                    break;
+                const found = smallestContainer(io.doc, p.p);
+                if (!found) {
+                    io.info("No closed boundary contains that point.");
+                    if (!loops.length)
+                        continue;
+                    continue;
+                }
+                const loop = loopOf(found);
+                if (loop) {
+                    loops.push(loop);
+                    for (const isl of islandsOf(io.doc, found))
+                        loops.push(isl);
+                }
+                io.info(`${loops.length} boundar${loops.length === 1 ? "y" : "ies"} found. Pick another point or press Enter.`);
             }
-            const loop = loopOf(found);
-            if (loop)
-                loops.push({ ent: found, loop });
         }
         if (!loops.length)
             return;
         io.transact(() => {
-            for (const item of loops) {
-                io.doc.add(io.make({
-                    type: "hatch",
-                    layer: io.doc.currentLayer,
-                    loops: [item.loop],
-                    pattern: pattern.toUpperCase(),
-                    scale: Math.max(0.01, scale),
-                    angle,
-                    solid,
-                }));
-            }
+            io.doc.add(io.make({
+                type: "hatch",
+                layer: io.doc.currentLayer,
+                loops,
+                pattern: pattern.toUpperCase(),
+                scale: Math.max(0.01, scale),
+                angle,
+                solid,
+            }));
         });
-        io.info(`${loops.length} hatch${loops.length === 1 ? "" : "es"} created.`);
+        io.info("Hatch created.");
     }
     function loopOf(e) {
         if (e.type === "circle")
@@ -4966,30 +5349,64 @@
             return { circle: { c: { ...e.c }, r: e.or } };
         return null;
     }
+    /** Closed shapes a hatch can use, including the ones inside block references. */
+    function loopCandidates(doc) {
+        const out = [];
+        for (const e of doc.all()) {
+            if (!(0, entities_ts_1.visibleEnt)(e, doc.layers))
+                continue;
+            if (e.type === "insert") {
+                const block = doc.blocks.get(e.name.toLowerCase());
+                if (block)
+                    for (const child of (0, entities_ts_1.placedInsert)(e, block))
+                        if (loopOf(child))
+                            out.push(child);
+                continue;
+            }
+            if (loopOf(e))
+                out.push(e);
+        }
+        return out;
+    }
+    function loopContains(loop, p) {
+        if ("circle" in loop)
+            return (0, math_ts_1.dist)(p, loop.circle.c) < loop.circle.r;
+        return pointIn(p, (0, geom_ts_1.tessellate)(loop.pts, true));
+    }
+    function loopSample(loop) {
+        return "circle" in loop ? loop.circle.c : loop.pts[0];
+    }
     function smallestContainer(doc, p) {
         let best = null;
         let bestA = Infinity;
-        for (const e of doc.all()) {
-            if (!(0, entities_ts_1.editableEnt)(e, doc.layers) && e.layer) {
-                /* still allow hatch of visible geometry */
-            }
+        for (const e of loopCandidates(doc)) {
             const loop = loopOf(e);
-            if (!loop)
-                continue;
-            const area = (0, entities_ts_1.areaOf)(e) ?? (e.type === "ellipse" ? 1e9 : 0);
-            let inside = false;
-            if ("circle" in loop)
-                inside = (0, math_ts_1.dist)(p, loop.circle.c) < loop.circle.r;
-            else {
-                const poly = (0, geom_ts_1.tessellate)(loop.pts, true);
-                inside = pointIn(p, poly);
-            }
-            if (inside && area < bestA && area > 0) {
+            const area = (0, entities_ts_1.areaOf)(e) ?? 0;
+            if (area > 0 && area < bestA && loopContains(loop, p)) {
                 bestA = area;
                 best = e;
             }
         }
         return best;
+    }
+    /** Closed shapes directly inside `outer` (not nested inside another inner shape) become holes. */
+    function islandsOf(doc, outer) {
+        const outerLoop = loopOf(outer);
+        const outerArea = (0, entities_ts_1.areaOf)(outer) ?? 0;
+        const inside = [];
+        for (const e of loopCandidates(doc)) {
+            if (e === outer || e.id === outer.id)
+                continue;
+            const loop = loopOf(e);
+            const area = (0, entities_ts_1.areaOf)(e) ?? 0;
+            if (area <= 0 || area >= outerArea)
+                continue;
+            if (loopContains(outerLoop, loopSample(loop)))
+                inside.push({ loop, area });
+        }
+        return inside
+            .filter((c) => !inside.some((d) => d !== c && d.area > c.area && loopContains(d.loop, loopSample(c.loop))))
+            .map((c) => c.loop);
     }
     function pointIn(p, poly) {
         let inside = false;
@@ -5021,7 +5438,7 @@
                 ],
             preview: (c) => {
                 const axis = aligned ? "aligned" : Math.abs(c.y - (a.p.y + b.p.y) / 2) >= Math.abs(c.x - (a.p.x + b.p.x) / 2) ? "h" : "v";
-                return [io.make({ type: "dim", dim: { kind: "linear", axis, p1: a.p, p2: b.p, loc: c } })];
+                return [io.make({ type: "dim", dim: { kind: "linear", axis, p1: a.p, p2: b.p, loc: c, th: io.doc.dimtxt, prec: io.doc.dimprec } })];
             },
         });
         if (loc.t === "kw") {
@@ -5029,13 +5446,13 @@
             if (p.t !== "point")
                 return;
             const axis = loc.name === "Vertical" ? "v" : "h";
-            io.transact(() => io.doc.add(io.make({ type: "dim", dim: { kind: "linear", axis, p1: a.p, p2: b.p, loc: p.p } })));
+            io.transact(() => io.doc.add(io.make({ type: "dim", dim: { kind: "linear", axis, p1: a.p, p2: b.p, loc: p.p, th: io.doc.dimtxt, prec: io.doc.dimprec } })));
             return;
         }
         if (loc.t !== "point")
             return;
         const axis = aligned ? "aligned" : Math.abs(loc.p.y - (a.p.y + b.p.y) / 2) >= Math.abs(loc.p.x - (a.p.x + b.p.x) / 2) ? "h" : "v";
-        io.transact(() => io.doc.add(io.make({ type: "dim", dim: { kind: "linear", axis, p1: a.p, p2: b.p, loc: loc.p } })));
+        io.transact(() => io.doc.add(io.make({ type: "dim", dim: { kind: "linear", axis, p1: a.p, p2: b.p, loc: loc.p, th: io.doc.dimtxt, prec: io.doc.dimprec } })));
     }
     async function dimRadial(io, dia) {
         io.ensureDraw();
@@ -5051,12 +5468,12 @@
         const r = e.type === "donut" ? e.or : e.r;
         const loc = await io.point("Specify dimension line location:", {
             base: c,
-            preview: (p) => [io.make({ type: "dim", dim: { kind: "radial", c, r, ang: Math.atan2(p.y - c.y, p.x - c.x), dia } })],
+            preview: (p) => [io.make({ type: "dim", dim: { kind: "radial", c, r, ang: Math.atan2(p.y - c.y, p.x - c.x), dia, th: io.doc.dimtxt, prec: io.doc.dimprec } })],
         });
         if (loc.t !== "point")
             return;
         const ang = Math.atan2(loc.p.y - c.y, loc.p.x - c.x);
-        io.transact(() => io.doc.add(io.make({ type: "dim", dim: { kind: "radial", c, r, ang, dia } })));
+        io.transact(() => io.doc.add(io.make({ type: "dim", dim: { kind: "radial", c, r, ang, dia, th: io.doc.dimtxt, prec: io.doc.dimprec } })));
     }
     async function dimAngular(io) {
         io.ensureDraw();
@@ -5079,14 +5496,14 @@
                 void a0;
                 const angA = angleOfLineNear(a.ent, hit, a.at);
                 const angB = angleOfLineNear(b.ent, hit, b.at);
-                return [io.make({ type: "dim", dim: { kind: "angular", c: hit, a0: angA, a1: angB, r } })];
+                return [io.make({ type: "dim", dim: { kind: "angular", c: hit, a0: angA, a1: angB, r, th: io.doc.dimtxt, prec: io.doc.dimprec } })];
             },
         });
         if (loc.t !== "point")
             return;
         const angA = angleOfLineNear(a.ent, hit, a.at);
         const angB = angleOfLineNear(b.ent, hit, b.at);
-        io.transact(() => io.doc.add(io.make({ type: "dim", dim: { kind: "angular", c: hit, a0: angA, a1: angB, r: (0, math_ts_1.dist)(hit, loc.p) } })));
+        io.transact(() => io.doc.add(io.make({ type: "dim", dim: { kind: "angular", c: hit, a0: angA, a1: angB, r: (0, math_ts_1.dist)(hit, loc.p), th: io.doc.dimtxt, prec: io.doc.dimprec } })));
     }
     function lineish(a, b, c, d) {
         const r = (0, math_ts_1.sub)(b, a);
@@ -5130,25 +5547,37 @@
         if (base.t !== "point")
             return;
         const made = [];
-        while (true) {
-            const to = await io.point("Specify second point or [Exit]:", {
-                base: base.p,
-                keywords: [{ name: "Exit", aliases: ["e"] }],
-                preview: (c) => ents.map((e) => (0, entities_ts_1.translateEnt)((0, entities_ts_1.retag)((0, entities_ts_1.cloneEnt)(e)), (0, math_ts_1.sub)(c, base.p))),
-            });
-            if (to.t === "none" || to.t === "kw")
-                break;
-            if (to.t !== "point")
-                return;
-            for (const e of ents)
-                made.push((0, entities_ts_1.translateEnt)((0, entities_ts_1.retag)((0, entities_ts_1.cloneEnt)(e)), (0, math_ts_1.sub)(to.p, base.p)));
+        const commit = () => {
+            if (!made.length)
+                return 0;
+            const batch = made.splice(0, made.length);
+            io.transact(() => batch.forEach((e) => io.doc.add(e)));
+            return batch.length;
+        };
+        try {
+            while (true) {
+                const to = await io.point("Specify second point or [Exit]:", {
+                    base: base.p,
+                    keywords: [{ name: "Exit", aliases: ["e"] }],
+                    preview: (c) => [...made, ...ents.map((e) => (0, entities_ts_1.translateEnt)((0, entities_ts_1.retag)((0, entities_ts_1.cloneEnt)(e)), (0, math_ts_1.sub)(c, base.p)))],
+                });
+                if (to.t === "none" || to.t === "kw")
+                    break;
+                if (to.t !== "point")
+                    break;
+                for (const e of ents)
+                    made.push((0, entities_ts_1.translateEnt)((0, entities_ts_1.retag)((0, entities_ts_1.cloneEnt)(e)), (0, math_ts_1.sub)(to.p, base.p)));
+                io.preview(made);
+            }
+        }
+        catch (err) {
+            commit();
+            throw err;
         }
         io.preview(null);
-        if (!made.length)
-            return;
-        io.transact(() => made.forEach((e) => io.doc.add(e)));
-        io.setSelection(made.map((e) => e.id));
-        io.info(`${made.length / ents.length} copy set${made.length === ents.length ? "" : "s"}.`);
+        const n = commit();
+        if (n)
+            io.info(`${n / ents.length} cop${n === ents.length ? "y" : "ies"} made.`);
     }
     async function rotate(io) {
         const ents = io.editable(await io.select("Select objects:"));
@@ -5230,7 +5659,7 @@
                     io.doc.remove(e.id);
             copies.forEach((e) => io.doc.add(e));
         });
-        io.setSelection(copies.map((e) => e.id));
+        io.setSelection([]);
     }
     async function offset(io) {
         const dAns = await io.number(`Specify offset distance <${io.doc.offsetDist}>:`, { def: io.doc.offsetDist });
@@ -5313,7 +5742,8 @@
         return (0, geom_ts_1.sideOfPoly)(open, side);
     }
     async function trim(io) {
-        const picked = await io.select("Select cutting edges:");
+        io.setSelection([]);
+        const picked = await io.select("Select cutting edges (Enter = all):", { noPickFirst: true });
         const all = picked.length === 0;
         if (all)
             io.info("All visible objects are cutting edges.");
@@ -5337,7 +5767,8 @@
         }
     }
     async function extend(io) {
-        const picked = await io.select("Select boundary edges:");
+        io.setSelection([]);
+        const picked = await io.select("Select boundary edges (Enter = all):", { noPickFirst: true });
         const all = picked.length === 0;
         while (true) {
             const hit = await io.pick("Select object to extend:");
@@ -5687,74 +6118,129 @@
             parts.forEach((p) => io.doc.add(p));
         });
     }
+    function reversePts(pts) {
+        const rev = [...pts].reverse();
+        return rev.map((p, i) => {
+            const prev = rev[i + 1];
+            const q = { x: p.x, y: p.y };
+            if (prev && prev.b)
+                q.b = -prev.b;
+            return q;
+        });
+    }
     async function join(io) {
-        const ents = io.editable(await io.select("Select lines, arcs, or polylines to join:"));
+        const ents = io.editable(await io.select("Select lines, arcs, or open polylines to join:"));
         if (ents.length < 2)
             return void io.info("Select at least two objects.");
-        const lines = ents.filter((e) => e.type === "line");
-        const polys = ents.filter((e) => e.type === "polyline");
-        const tol = Math.max(1e-4, 1.5 / io.ppm());
-        const consumed = new Set();
-        const made = [];
-        // Collinear line chains.
-        const pool = lines.map((e) => ({ e, used: false }));
-        for (const seed of pool) {
-            if (seed.used)
+        const tol = 1e-4;
+        // 1. Everything becomes a "piece": a list of vertices with bulges, plus the ids it came from.
+        let pieces = [];
+        for (const e of ents) {
+            if (e.type === "line")
+                pieces.push({ kind: "line", pts: [{ ...e.a }, { ...e.b }], ids: [e.id], st: e });
+            else if (e.type === "arc" && e.sweep < math_ts_1.TAU - 1e-6)
+                pieces.push({
+                    kind: "arc",
+                    pts: [
+                        { ...(0, geom_ts_1.arcPoint)(e.c, e.r, e.a0), b: Math.tan(e.sweep / 4) },
+                        { ...(0, geom_ts_1.arcPoint)(e.c, e.r, e.a0 + e.sweep) },
+                    ],
+                    ids: [e.id],
+                    st: e,
+                });
+            else if (e.type === "polyline" && !e.closed && e.pts.length >= 2)
+                pieces.push({ kind: "poly", pts: e.pts.map((p) => ({ ...p })), ids: [e.id], st: e });
+        }
+        if (pieces.length < 2)
+            return void io.info("Nothing to join: select lines, arcs, or open polylines.");
+        // 2. Collinear, touching or overlapping lines collapse into one longer line.
+        let merged = true;
+        while (merged) {
+            merged = false;
+            outer: for (let i = 0; i < pieces.length; i++) {
+                if (pieces[i].kind !== "line")
+                    continue;
+                for (let j = i + 1; j < pieces.length; j++) {
+                    if (pieces[j].kind !== "line")
+                        continue;
+                    const A = pieces[i].pts;
+                    const B = pieces[j].pts;
+                    if (!collinearEnough(A[0], A[1], B[0], tol) || !collinearEnough(A[0], A[1], B[1], tol))
+                        continue;
+                    const span = gapOrOverlap(A[0], A[1], B[0], B[1], tol);
+                    if (!span)
+                        continue;
+                    pieces[i] = { kind: "line", pts: [{ ...span[0] }, { ...span[1] }], ids: [...pieces[i].ids, ...pieces[j].ids], st: pieces[i].st };
+                    pieces.splice(j, 1);
+                    merged = true;
+                    break outer;
+                }
+            }
+        }
+        // 3. End-to-end chains of any mix of lines, arcs and polylines become polylines.
+        const out = [];
+        const used = new Array(pieces.length).fill(false);
+        for (let s0 = 0; s0 < pieces.length; s0++) {
+            if (used[s0])
                 continue;
-            let a = seed.e.a;
-            let b = seed.e.b;
-            seed.used = true;
-            consumed.add(seed.e.id);
+            used[s0] = true;
+            let pts = pieces[s0].pts.map((p) => ({ ...p }));
+            const ids = [...pieces[s0].ids];
+            let pieceCount = 1;
             let grew = true;
             while (grew) {
                 grew = false;
-                for (const other of pool) {
-                    if (other.used)
+                for (let k = 0; k < pieces.length; k++) {
+                    if (used[k])
                         continue;
-                    if (!collinearEnough(a, b, other.e.a, tol) || !collinearEnough(a, b, other.e.b, tol))
+                    const op = pieces[k].pts;
+                    const head = pts[0];
+                    const tail = pts[pts.length - 1];
+                    const os = op[0];
+                    const oe = op[op.length - 1];
+                    if ((0, math_ts_1.dist)(tail, os) <= tol)
+                        pts = [...pts.slice(0, -1), ...op.map((p) => ({ ...p }))];
+                    else if ((0, math_ts_1.dist)(tail, oe) <= tol)
+                        pts = [...pts.slice(0, -1), ...reversePts(op)];
+                    else if ((0, math_ts_1.dist)(head, oe) <= tol)
+                        pts = [...op.slice(0, -1).map((p) => ({ ...p })), ...pts];
+                    else if ((0, math_ts_1.dist)(head, os) <= tol)
+                        pts = [...reversePts(op).slice(0, -1), ...pts];
+                    else
                         continue;
-                    const gap = gapOrOverlap(a, b, other.e.a, other.e.b, tol);
-                    if (!gap)
-                        continue;
-                    a = gap[0];
-                    b = gap[1];
-                    other.used = true;
-                    consumed.add(other.e.id);
+                    used[k] = true;
+                    ids.push(...pieces[k].ids);
+                    pieceCount++;
                     grew = true;
+                    break;
                 }
             }
-            if (consumed.has(seed.e.id) && ((0, math_ts_1.dist)(a, seed.e.a) > tol || (0, math_ts_1.dist)(b, seed.e.b) > tol || pool.filter((p) => p.used).length > 1)) {
-                made.push(io.make({ type: "line", a, b, layer: seed.e.layer, color: seed.e.color, lt: seed.e.lt, lw: seed.e.lw }));
+            if (ids.length < 2)
+                continue;
+            const st = pieces[s0].st;
+            const style = { layer: st.layer, color: st.color, lt: st.lt, lw: st.lw };
+            if (pieceCount === 1 && pts.length === 2 && !pts[0].b) {
+                out.push({ ids, ent: io.make({ type: "line", a: pts[0], b: pts[1], ...style }) });
+                continue;
             }
-            else {
-                consumed.delete(seed.e.id);
+            let closed = false;
+            if (pts.length >= 3 && (0, math_ts_1.dist)(pts[0], pts[pts.length - 1]) <= tol) {
+                pts = pts.slice(0, -1);
+                closed = true;
             }
+            out.push({ ids, ent: io.make({ type: "polyline", pts, closed, width: 0, ...style }) });
         }
-        // Polyline endpoint welds, in list order.
-        if (polys.length >= 2) {
-            let acc = polys[0];
-            const ids = [acc.id];
-            for (let i = 1; i < polys.length; i++) {
-                const next = polys[i];
-                const welded = weld(acc, next, tol);
-                if (!welded)
-                    continue;
-                acc = welded;
-                ids.push(next.id);
-            }
-            if (ids.length > 1) {
-                ids.forEach((id) => consumed.add(id));
-                made.push({ ...acc, id: (0, entities_ts_1.uid)() });
-            }
-        }
-        if (!made.length)
+        if (!out.length)
             return void io.info("Nothing connected closely enough to join.");
         io.transact(() => {
-            consumed.forEach((id) => io.doc.remove(id));
-            made.forEach((e) => io.doc.add(e));
+            for (const o of out)
+                for (const id of o.ids)
+                    io.doc.remove(id);
+            for (const o of out)
+                io.doc.add(o.ent);
         });
-        io.setSelection(made.map((e) => e.id));
-        io.info("Joined.");
+        const n = out.reduce((s, o) => s + o.ids.length, 0);
+        io.info(`Joined ${n} object${n === 1 ? "" : "s"} into ${out.length}.`);
     }
     function collinearEnough(a, b, c, tol) {
         const ab = (0, math_ts_1.len)((0, math_ts_1.sub)(b, a)) || 1;
@@ -5955,14 +6441,20 @@
     async function layerCmd(io) {
         io.showSide("layers");
         io.info(`Current layer: ${io.doc.currentLayer}`);
-        const opt = await io.choose("Layer [Make/Set/New/On/Off/Lock/Unlock] <exit>:", [
+        const opt = await io.choose("Layer [Make/Set/New/On/Off/Freeze/Thaw/Lock/Unlock/Color/Ltype/Rename/Delete] <exit>:", [
             { name: "Make", aliases: ["m"] },
             { name: "Set", aliases: ["s"] },
             { name: "New", aliases: ["n"] },
             { name: "On", aliases: ["on"] },
             { name: "Off", aliases: ["off"] },
+            { name: "Freeze", aliases: ["f"] },
+            { name: "Thaw", aliases: ["t"] },
             { name: "Lock", aliases: ["lo"] },
             { name: "Unlock", aliases: ["u"] },
+            { name: "Color", aliases: ["c"] },
+            { name: "Ltype", aliases: ["lt"] },
+            { name: "Rename", aliases: ["r"] },
+            { name: "Delete", aliases: ["d"] },
             { name: "Exit", aliases: ["x"] },
         ], "Exit");
         if (opt === "Exit")
@@ -5973,8 +6465,10 @@
         const existing = io.doc.layers.find((l) => l.name.toLowerCase() === name.toLowerCase());
         if (opt === "New" || opt === "Make") {
             if (existing) {
-                if (opt === "Make")
+                if (opt === "Make") {
                     io.doc.currentLayer = existing.name;
+                    io.doc.bump();
+                }
                 else
                     io.info("Layer already exists.");
                 return;
@@ -5993,11 +6487,75 @@
             io.doc.bump();
             return;
         }
+        if (opt === "Color") {
+            const n = await io.number("Color number 1-255 <7>:", { def: 7 });
+            if (n.t !== "num" || !Number.isInteger(n.v) || n.v < 1 || n.v > 255)
+                return void io.info("Enter a whole number from 1 to 255.");
+            io.transact(() => {
+                existing.color = n.v;
+            });
+            return;
+        }
+        if (opt === "Ltype") {
+            const lt = await io.choose("Linetype [Continuous/Dashed/Hidden/Center/Phantom/Dot/Dashdot/Divide] <Continuous>:", entities_ts_1.LINETYPES.map((n) => ({ name: n, aliases: [n.slice(0, 2)] })), "continuous");
+            io.transact(() => {
+                existing.lt = lt.toLowerCase();
+            });
+            return;
+        }
+        if (opt === "Rename") {
+            const to = (await io.text("New layer name:")).trim();
+            if (!to)
+                return;
+            if (existing.name === "0")
+                return void io.info("Layer 0 cannot be renamed.");
+            if (io.doc.layers.some((l) => l !== existing && l.name.toLowerCase() === to.toLowerCase()))
+                return void io.info("That name is already in use.");
+            io.transact(() => {
+                const was = existing.name;
+                existing.name = to;
+                if (io.doc.currentLayer === was)
+                    io.doc.currentLayer = to;
+                const fix = (e) => {
+                    if (e.layer.toLowerCase() === was.toLowerCase())
+                        e.layer = to;
+                };
+                for (const e of io.doc.ents.values())
+                    fix(e);
+                for (const blk of io.doc.blocks.values())
+                    for (const e of blk.ents)
+                        fix(e);
+            });
+            return;
+        }
+        if (opt === "Delete") {
+            if (existing.name === "0")
+                return void io.info("Layer 0 cannot be deleted.");
+            if (existing.name === io.doc.currentLayer)
+                return void io.info("The current layer cannot be deleted.");
+            const key = existing.name.toLowerCase();
+            const inUse = [...io.doc.ents.values()].some((e) => e.layer.toLowerCase() === key) ||
+                [...io.doc.blocks.values()].some((blk) => blk.ents.some((e) => e.layer.toLowerCase() === key));
+            if (inUse)
+                return void io.info("That layer still holds objects. Move or erase them first.");
+            io.transact(() => {
+                io.doc.layers.splice(io.doc.layers.indexOf(existing), 1);
+            });
+            return;
+        }
         io.transact(() => {
             if (opt === "On")
                 existing.on = true;
             if (opt === "Off")
                 existing.on = false;
+            if (opt === "Freeze") {
+                if (existing.name === io.doc.currentLayer)
+                    io.info("The current layer cannot be frozen.");
+                else
+                    existing.frozen = true;
+            }
+            if (opt === "Thaw")
+                existing.frozen = false;
             if (opt === "Lock")
                 existing.locked = true;
             if (opt === "Unlock")
@@ -6188,6 +6746,36 @@
                     io.doc.bump();
                 }
             } },
+        { name: "DIMSTYLE", aliases: ["dst", "dimtxt", "dimstyle"], group: "Format", label: "Dim style", hint: "Dimension text height and decimals for new dimensions", run: async (io) => {
+                const h = await io.number(`Dimension text height <${io.doc.dimtxt}>:`, { def: io.doc.dimtxt });
+                if (h.t === "num" && h.v > 0)
+                    io.doc.dimtxt = h.v;
+                const p = await io.number(`Decimal places for dimensions <${io.doc.dimprec}>:`, { def: io.doc.dimprec });
+                if (p.t === "num")
+                    io.doc.dimprec = Math.max(0, Math.min(8, Math.round(p.v)));
+                io.doc.bump();
+                io.info(`New dimensions: text ${io.doc.dimtxt}, ${io.doc.dimprec} decimals.`);
+            } },
+        { name: "SNAP", aliases: ["sn", "snapstep"], group: "Format", label: "Snap spacing", hint: "Grid snap spacing (F9 toggles)", run: async (io) => {
+                const n = await io.number(`Snap spacing <${io.snapStepValue()}>:`, { def: io.snapStepValue() });
+                if (n.t === "num" && n.v > 0)
+                    io.setSnapStep(n.v);
+            } },
+        { name: "POLARANG", aliases: ["pa", "polar"], group: "Format", label: "Polar angle", hint: "Polar tracking increment in degrees (F10 toggles)", run: async (io) => {
+                const n = await io.number(`Polar angle increment <${io.polarStepValue()}>:`, { def: io.polarStepValue() });
+                if (n.t === "num" && n.v > 0 && n.v <= 180)
+                    io.setPolarStep(n.v);
+            } },
+        { name: "SAVE", aliases: ["qsave"], group: "Tools", label: "Save", hint: "Download the drawing as DXF", run: async (io) => io.saveDrawing() },
+        { name: "SAVEAS", aliases: ["saveas"], group: "Tools", label: "Save as", hint: "Download under a new file name", run: async (io) => {
+                const n = (await io.text("File name:")).trim();
+                if (n)
+                    io.saveDrawing(n);
+            } },
+        { name: "OPEN", aliases: ["open"], group: "Tools", label: "Open", hint: "Open a DXF file", run: async (io) => io.openDialog() },
+        { name: "NEW", aliases: ["new"], group: "Tools", label: "New", hint: "Start an empty drawing", run: async (io) => io.newDrawingCmd() },
+        { name: "EXPORTSVG", aliases: ["svg"], group: "Tools", label: "Export SVG", hint: "Vector image of the whole drawing", run: async (io) => io.exportImage("svg") },
+        { name: "EXPORTPNG", aliases: ["png"], group: "Tools", label: "Export PNG", hint: "Raster image of the whole drawing", run: async (io) => io.exportImage("png") },
         { name: "BLOCK", aliases: ["b"], group: "Tools", label: "Block", hint: "Define a block from the selection", run: blockCmd },
         { name: "INSERT", aliases: ["i"], group: "Tools", label: "Insert", hint: "Place a block", run: insertCmd },
         { name: "UNDO", aliases: ["u"], group: "Tools", label: "Undo", hint: "Undo last change", run: async (io) => io.undo() },
@@ -6343,6 +6931,7 @@
     Object.defineProperty(exports, "__esModule", { value: true });
     exports.mountNorthline = mountNorthline;
     const commands_ts_1 = require("./commands.ts");
+    const geom_ts_1 = require("./geom.ts");
     const doc_ts_1 = require("./doc.ts");
     const dxf_ts_1 = require("./dxf.ts");
     const entities_ts_1 = require("./entities.ts");
@@ -6464,6 +7053,8 @@
         ro;
         onKey;
         onWin;
+        onUnload;
+        palLayer = null;
         alive = true;
         menuEl = null;
         constructor(host) {
@@ -6496,7 +7087,23 @@
             this.ro.observe(this.canvas);
             this.onKey = (e) => this.key(e);
             window.addEventListener("keydown", this.onKey);
-            this.onWin = () => this.closePop();
+            this.onUnload = (e) => {
+                if (this.dirty) {
+                    e.preventDefault();
+                    e.returnValue = "";
+                }
+            };
+            window.addEventListener("beforeunload", this.onUnload);
+            this.onWin = (e) => {
+                const t = e && e.target;
+                if (t && t.closest && (t.closest(".nl-menuwrap") || t.closest(".nl-help-card") || t.closest(".nl-swatchpop")))
+                    return;
+                if (t && t.classList && t.classList.contains("nl-help")) {
+                    t.hidden = true;
+                    return;
+                }
+                this.closePop();
+            };
             window.addEventListener("pointerdown", this.onWin);
             this.resize();
             this.echo("Northline  —  a 2D drafting desk");
@@ -6512,6 +7119,9 @@
                 count: () => this.doc.ents.size,
                 check: () => (0, selfcheck_ts_1.runSelfCheck)(),
                 run: (name) => this.launch(name),
+                doc: () => this.doc,
+                view: () => this.view,
+                selection: () => [...this.selection],
             };
             if (!window.matchMedia("(pointer: coarse)").matches)
                 this.input.focus();
@@ -6522,6 +7132,7 @@
             this.ro.disconnect();
             window.removeEventListener("keydown", this.onKey);
             window.removeEventListener("pointerdown", this.onWin);
+            window.removeEventListener("beforeunload", this.onUnload);
             this.host.innerHTML = "";
         }
         // —— CadIO ——
@@ -6538,8 +7149,8 @@
         choose(message, keywords, def) {
             return this.wait("choose", message, keywords, undefined, def);
         }
-        select(message = "Select objects:") {
-            if (this.selection.size) {
+        select(message = "Select objects:", opts) {
+            if (!opts?.noPickFirst && this.selection.size) {
                 const ents = this.selectionEnts();
                 this.info(`${ents.length} found`);
                 return Promise.resolve(ents);
@@ -6661,6 +7272,226 @@
                 this.scheduleSave();
                 this.syncChrome();
             }
+        }
+        snapStepValue() {
+            return this.snapStep;
+        }
+        setSnapStep(v) {
+            this.snapStep = v;
+            this.savePrefs();
+            this.requestDraw();
+            this.echo(`Snap spacing ${v}. F9 toggles snap.`);
+        }
+        polarStepValue() {
+            return this.polarStep;
+        }
+        setPolarStep(v) {
+            this.polarStep = v;
+            this.savePrefs();
+            this.echo(`Polar increment ${v}°. F10 toggles polar tracking.`);
+        }
+        saveDrawing(name) {
+            if (name)
+                this.fileName = /\.dxf$/i.test(name) ? name : `${name}.dxf`;
+            this.save();
+        }
+        openDialog() {
+            this.host.querySelector(".nl-file").click();
+        }
+        newDrawingCmd() {
+            void this.newDrawing();
+        }
+        selectAll() {
+            this.selection = new Set(this.doc.all().filter((en) => this.canSelect(en)).map((en) => en.id));
+            this.refreshGrips();
+            this.syncProps();
+            this.requestDraw();
+        }
+        deselect() {
+            this.selection.clear();
+            this.refreshGrips();
+            this.syncProps();
+            this.requestDraw();
+        }
+        eraseSelection() {
+            const ents = this.editable(this.selectionEnts());
+            if (!ents.length)
+                return;
+            this.transact(() => ents.forEach((en) => this.doc.remove(en.id)));
+            this.selection.clear();
+            this.refreshGrips();
+            this.syncProps();
+        }
+        download(blob, name) {
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = name;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+        }
+        exportImage(kind) {
+            const b = this.doc.extents();
+            if (!b)
+                return void this.echo("Nothing to export.");
+            const base = this.fileName.replace(/\.dxf$/i, "");
+            if (kind === "svg") {
+                this.download(new Blob([this.buildSvg(b)], { type: "image/svg+xml" }), `${base}.svg`);
+                this.echo(`Exported ${base}.svg`);
+                return;
+            }
+            const root = this.host.querySelector(".nl");
+            const theme = (0, render_ts_1.themeFrom)(root);
+            const w = 2400;
+            const bw = Math.max(1e-6, b.maxx - b.minx);
+            const bh = Math.max(1e-6, b.maxy - b.miny);
+            const h = Math.max(200, Math.round(w * (bh / bw)));
+            const cv = document.createElement("canvas");
+            cv.width = w;
+            cv.height = Math.min(h, 6000);
+            const view = { cx: 0, cy: 0, ppm: 1, w: cv.width, h: cv.height };
+            (0, render_ts_1.viewOfBox)(view, b.minx, b.miny, b.maxx, b.maxy, 1.06);
+            view.ppm = Math.min(8000, view.ppm);
+            const ctx = cv.getContext("2d");
+            (0, render_ts_1.drawScene)(ctx, view, this.doc, theme, { preview: [], selected: new Set(), hover: null, grips: [], rubber: null, snap: null, trackFrom: null, cursor: null, showCross: false, pickbox: false }, { grid: false, lwt: this.lwt, snapStep: 0 });
+            cv.toBlob((blob) => {
+                if (blob) {
+                    this.download(blob, `${base}.png`);
+                    this.echo(`Exported ${base}.png`);
+                }
+            }, "image/png");
+        }
+        buildSvg(b) {
+            const pad = Math.max(b.maxx - b.minx, b.maxy - b.miny) * 0.03 + 1;
+            const minx = b.minx - pad;
+            const maxx = b.maxx + pad;
+            const miny = b.miny - pad;
+            const maxy = b.maxy + pad;
+            const X = (x) => +(x - minx).toFixed(5);
+            const Y = (y) => +(maxy - y).toFixed(5);
+            const esc = (t) => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+            const DASH = { dashed: [6, 3], hidden: [3, 1.5], center: [12, 2, 1.5, 2], phantom: [12, 2, 1.5, 2, 1.5, 2], dot: [0.4, 2], dashdot: [6, 2, 0.4, 2], divide: [6, 2, 0.4, 2, 0.4, 2] };
+            const out = [];
+            let clipN = 0;
+            const defs = [];
+            const pathOf = (pts, closed) => {
+                const n = pts.length;
+                const segs = closed ? n : n - 1;
+                let d = `M${X(pts[0].x)} ${Y(pts[0].y)}`;
+                for (let i = 0; i < segs; i++) {
+                    const p = pts[i];
+                    const q = pts[(i + 1) % n];
+                    const arc = p.b ? (0, geom_ts_1.bulgeArc)(p, q, p.b) : null;
+                    if (arc) {
+                        const large = Math.abs(arc.sweep) > Math.PI ? 1 : 0;
+                        const sf = arc.sweep > 0 ? 0 : 1;
+                        d += `A${arc.r} ${arc.r} 0 ${large} ${sf} ${X(q.x)} ${Y(q.y)}`;
+                    }
+                    else
+                        d += `L${X(q.x)} ${Y(q.y)}`;
+                }
+                return d + (closed ? "Z" : "");
+            };
+            const emit = (e, host) => {
+                if (e.type === "insert") {
+                    const block = this.doc.blocks.get(e.name.toLowerCase());
+                    if (block)
+                        for (const c of (0, entities_ts_1.placedInsert)(e, block))
+                            emit(c, e);
+                    return;
+                }
+                if (e.type === "dim") {
+                    for (const c of (0, entities_ts_1.explodeDim)(e))
+                        emit(c, e);
+                    return;
+                }
+                if (!(0, entities_ts_1.visibleEnt)(e, this.doc.layers))
+                    return;
+                const paint = (0, entities_ts_1.resolvedPaint)(e, this.doc.layers, "#000000");
+                const col = paint.color;
+                const dash = DASH[paint.lt];
+                const sw = Math.max(0.05, paint.lw);
+                const stroke = `fill="none" stroke="${col}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"${dash ? ` stroke-dasharray="${dash.map((n) => +(n * this.doc.ltscale).toFixed(3)).join(" ")}"` : ""}`;
+                const sample = (a) => a.map((p) => ({ x: p.x, y: p.y }));
+                switch (e.type) {
+                    case "line":
+                        out.push(`<path d="M${X(e.a.x)} ${Y(e.a.y)}L${X(e.b.x)} ${Y(e.b.y)}" ${stroke}/>`);
+                        break;
+                    case "circle":
+                        out.push(`<circle cx="${X(e.c.x)}" cy="${Y(e.c.y)}" r="${e.r}" ${stroke}/>`);
+                        break;
+                    case "arc": {
+                        const s0 = (0, geom_ts_1.arcPoint)(e.c, e.r, e.a0);
+                        const s1 = (0, geom_ts_1.arcPoint)(e.c, e.r, e.a0 + e.sweep);
+                        out.push(`<path d="M${X(s0.x)} ${Y(s0.y)}A${e.r} ${e.r} 0 ${e.sweep > Math.PI ? 1 : 0} 0 ${X(s1.x)} ${Y(s1.y)}" ${stroke}/>`);
+                        break;
+                    }
+                    case "polyline":
+                        out.push(`<path d="${pathOf(e.pts, e.closed)}" ${stroke}/>`);
+                        break;
+                    case "spline":
+                        out.push(`<path d="${pathOf(sample((0, entities_ts_1.splineSamples)(e.pts)), false)}" ${stroke}/>`);
+                        break;
+                    case "ellipse":
+                        out.push(`<path d="${pathOf(sample((0, entities_ts_1.ellipseSamples)(e, 96)), e.sweep >= math_ts_1.TAU - 1e-3)}" ${stroke}/>`);
+                        break;
+                    case "donut":
+                        out.push(`<path fill="${col}" fill-rule="evenodd" d="M${X(e.c.x - e.or)} ${Y(e.c.y)}a${e.or} ${e.or} 0 1 0 ${2 * e.or} 0a${e.or} ${e.or} 0 1 0 ${-2 * e.or} 0ZM${X(e.c.x - e.ir)} ${Y(e.c.y)}a${e.ir} ${e.ir} 0 1 0 ${2 * e.ir} 0a${e.ir} ${e.ir} 0 1 0 ${-2 * e.ir} 0Z"/>`);
+                        break;
+                    case "point":
+                        out.push(`<path d="M${X(e.p.x) - 0.6} ${Y(e.p.y) - 0.6}l1.2 1.2m0 -1.2l-1.2 1.2" ${stroke}/>`);
+                        break;
+                    case "text": {
+                        const lines = e.text.split("\n");
+                        const anchor = e.align === "center" ? "middle" : e.align === "right" ? "end" : "start";
+                        const tsp = lines.map((l, i) => `<tspan x="0" dy="${i === 0 ? 0 : e.h * 1.25}">${esc(l)}</tspan>`).join("");
+                        out.push(`<text transform="translate(${X(e.p.x)} ${Y(e.p.y)}) rotate(${+(-(e.rot * 180) / Math.PI).toFixed(4)})" font-family="Arial, Helvetica, sans-serif" font-size="${e.h}" text-anchor="${anchor}" fill="${col}">${tsp}</text>`);
+                        break;
+                    }
+                    case "hatch": {
+                        const d = e.loops.map((l) => ("circle" in l ? `M${X(l.circle.c.x - l.circle.r)} ${Y(l.circle.c.y)}a${l.circle.r} ${l.circle.r} 0 1 0 ${2 * l.circle.r} 0a${l.circle.r} ${l.circle.r} 0 1 0 ${-2 * l.circle.r} 0Z` : pathOf(l.pts, l.closed))).join("");
+                        if (e.solid) {
+                            out.push(`<path d="${d}" fill="${col}" fill-opacity="0.55" fill-rule="evenodd"/>`);
+                            break;
+                        }
+                        const id = `h${clipN++}`;
+                        defs.push(`<clipPath id="${id}"><path d="${d}" clip-rule="evenodd"/></clipPath>`);
+                        const spacing = Math.max(0.4, 3.2 * (e.scale || 1));
+                        const name = e.pattern.toUpperCase();
+                        const angles = name === "ANSI37" ? [45, 135] : name === "ANSI32" ? [45, 45] : [45];
+                        const hb = (0, entities_ts_1.entityBBox)(e, this.doc.ctx());
+                        const diag = Math.hypot(hb.maxx - hb.minx, hb.maxy - hb.miny) + spacing * 2;
+                        const cx = (hb.minx + hb.maxx) / 2;
+                        const cy = (hb.miny + hb.maxy) / 2;
+                        let seg = "";
+                        angles.forEach((deg, idx) => {
+                            const ang = ((deg + e.angle) * Math.PI) / 180;
+                            const dir = { x: Math.cos(ang), y: Math.sin(ang) };
+                            const nrm = { x: -dir.y, y: dir.x };
+                            const steps = Math.min(4000, Math.ceil(diag / spacing));
+                            const shift = name === "ANSI32" && idx === 1 ? spacing / 2 : 0;
+                            for (let i = -steps; i <= steps; i++) {
+                                const ox = cx + nrm.x * (i * spacing + shift);
+                                const oy = cy + nrm.y * (i * spacing + shift);
+                                seg += `M${X(ox - dir.x * diag)} ${Y(oy - dir.y * diag)}L${X(ox + dir.x * diag)} ${Y(oy + dir.y * diag)}`;
+                            }
+                        });
+                        out.push(`<g clip-path="url(#${id})"><path d="${seg}" fill="none" stroke="${col}" stroke-width="0.13"/></g>`);
+                        break;
+                    }
+                    default:
+                        break;
+                }
+                void host;
+            };
+            for (const e of this.doc.all())
+                emit(e, null);
+            const W = +(maxx - minx).toFixed(4);
+            const H = +(maxy - miny).toFixed(4);
+            const unit = this.doc.units === 4 ? "mm" : this.doc.units === 5 ? "cm" : this.doc.units === 6 ? "m" : this.doc.units === 1 ? "in" : "";
+            const size = unit ? `width="${W}${unit}" height="${H}${unit}" ` : "";
+            return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" ${size}viewBox="0 0 ${W} ${H}">\n<defs>${defs.join("")}</defs>\n<rect width="${W}" height="${H}" fill="#ffffff"/>\n${out.join("\n")}\n</svg>\n`;
         }
         showSide(which) {
             this.side.classList.add("is-open");
@@ -7119,23 +7950,47 @@
             const add = document.createElement("button");
             add.type = "button";
             add.textContent = "New";
-            add.addEventListener("click", () => {
-                const name = window.prompt("Layer name");
-                if (!name?.trim())
+            const makeLayer = (raw) => {
+                const name = raw.trim();
+                if (!name)
                     return;
-                if (this.doc.layers.some((l) => l.name.toLowerCase() === name.trim().toLowerCase())) {
+                if (this.doc.layers.some((l) => l.name.toLowerCase() === name.toLowerCase())) {
                     this.echo("Layer already exists.");
                     return;
                 }
                 this.transact(() => {
-                    this.doc.layers.push({ name: name.trim(), color: 7, lt: "continuous", lw: 0.25, on: true, frozen: false, locked: false });
-                    this.doc.currentLayer = name.trim();
+                    this.doc.layers.push({ name, color: 7, lt: "continuous", lw: 0.25, on: true, frozen: false, locked: false });
+                    this.doc.currentLayer = name;
                 });
+            };
+            add.addEventListener("click", () => {
+                const box = this.layerBox.querySelector(".nl-newlayer");
+                if (box) {
+                    box.remove();
+                    return;
+                }
+                const wrap = document.createElement("div");
+                wrap.className = "nl-newlayer";
+                const inp = document.createElement("input");
+                inp.placeholder = "Layer name, Enter to add";
+                inp.addEventListener("keydown", (e) => {
+                    e.stopPropagation();
+                    if (e.key === "Enter")
+                        makeLayer(inp.value);
+                    else if (e.key === "Escape")
+                        wrap.remove();
+                });
+                wrap.appendChild(inp);
+                head.after(wrap);
+                inp.focus();
             });
             head.appendChild(add);
             this.layerBox.appendChild(head);
-            for (const layer of this.doc.layers)
+            for (const layer of this.doc.layers) {
                 this.layerBox.appendChild(this.layerRow(layer));
+                if (this.palLayer === layer.name)
+                    this.layerBox.appendChild(this.palette(layer));
+            }
             this.osnapRow();
         }
         layerRow(layer) {
@@ -7147,32 +8002,99 @@
             swatch.style.background = (0, aci_ts_1.aciHex)(layer.color, "#f4f1ea");
             swatch.title = "Color";
             swatch.addEventListener("click", () => {
-                const next = [1, 2, 3, 4, 5, 6, 7, 8, 9, 30];
-                const i = next.indexOf(layer.color);
-                const color = next[(i + 1) % next.length] ?? 7;
-                this.transact(() => {
-                    layer.color = color;
-                });
+                this.palLayer = this.palLayer === layer.name ? null : layer.name;
+                this.syncChrome();
             });
             const name = document.createElement("button");
             name.type = "button";
             name.className = "nl-layer-name";
             name.textContent = layer.name;
+            name.title = "Click: make current. Double-click: rename.";
             name.addEventListener("click", () => {
                 this.doc.currentLayer = layer.name;
                 this.doc.bump();
                 this.syncChrome();
                 this.echo(`Current layer: ${layer.name}`);
             });
-            row.append(swatch, name, this.flag(layer.on ? "On" : "Off", layer.on, () => this.transact(() => void (layer.on = !layer.on))), this.flag(layer.frozen ? "Frozen" : "Thawed", !layer.frozen, () => this.transact(() => void (layer.frozen = !layer.frozen))), this.flag(layer.locked ? "Locked" : "Unlocked", !layer.locked, () => this.transact(() => void (layer.locked = !layer.locked))));
+            name.addEventListener("dblclick", () => {
+                if (layer.name === "0")
+                    return void this.echo("Layer 0 cannot be renamed.");
+                const inp = document.createElement("input");
+                inp.className = "nl-layer-rename";
+                inp.value = layer.name;
+                name.replaceWith(inp);
+                inp.focus();
+                inp.select();
+                let done = false;
+                const finish = (ok) => {
+                    if (done)
+                        return;
+                    done = true;
+                    const to = inp.value.trim();
+                    if (!ok || !to || to === layer.name)
+                        return void this.syncChrome();
+                    if (this.doc.layers.some((l) => l !== layer && l.name.toLowerCase() === to.toLowerCase())) {
+                        this.echo("That name is already in use.");
+                        return void this.syncChrome();
+                    }
+                    this.transact(() => {
+                        const was = layer.name;
+                        layer.name = to;
+                        if (this.doc.currentLayer === was)
+                            this.doc.currentLayer = to;
+                        const fix = (e) => {
+                            if (e.layer.toLowerCase() === was.toLowerCase())
+                                e.layer = to;
+                        };
+                        for (const e of this.doc.ents.values())
+                            fix(e);
+                        for (const blk of this.doc.blocks.values())
+                            for (const e of blk.ents)
+                                fix(e);
+                    });
+                };
+                inp.addEventListener("keydown", (e) => {
+                    e.stopPropagation();
+                    if (e.key === "Enter")
+                        finish(true);
+                    else if (e.key === "Escape")
+                        finish(false);
+                });
+                inp.addEventListener("blur", () => finish(true));
+            });
+            row.append(swatch, name, this.flag(layer.on ? "On" : "Off", layer.on, () => this.transact(() => void (layer.on = !layer.on)), layer.on ? "On" : "Off", "Visible: click to turn off"), this.flag(layer.frozen ? "Frozen" : "Thawed", !layer.frozen, () => this.transact(() => {
+                if (!layer.frozen && layer.name === this.doc.currentLayer)
+                    return void this.echo("The current layer cannot be frozen.");
+                layer.frozen = !layer.frozen;
+            }), layer.frozen ? "Fz" : "Th", layer.frozen ? "Frozen: click to thaw" : "Thawed: click to freeze"), this.flag(layer.locked ? "Locked" : "Unlocked", !layer.locked, () => this.transact(() => void (layer.locked = !layer.locked)), layer.locked ? "Lk" : "Un", layer.locked ? "Locked: click to unlock" : "Unlocked: click to lock"));
             return row;
         }
-        flag(label, on, click) {
+        palette(layer) {
+            const box = document.createElement("div");
+            box.className = "nl-palette";
+            for (const c of [1, 2, 3, 4, 5, 6, 7, 8, 9, 30, 40, 50, 60, 70, 80, 90, 110, 130, 150, 170, 190, 210, 230, 250]) {
+                const b = document.createElement("button");
+                b.type = "button";
+                b.title = `ACI ${c}`;
+                b.style.background = (0, aci_ts_1.aciHex)(c, "#f4f1ea");
+                if (c === layer.color)
+                    b.className = "is-on";
+                b.addEventListener("click", () => {
+                    this.palLayer = null;
+                    this.transact(() => {
+                        layer.color = c;
+                    });
+                });
+                box.appendChild(b);
+            }
+            return box;
+        }
+        flag(label, on, click, text, tip) {
             const b = document.createElement("button");
             b.type = "button";
             b.className = "nl-flag" + (on ? " is-on" : "");
-            b.textContent = label.slice(0, 2);
-            b.title = label;
+            b.textContent = text ?? label.slice(0, 2);
+            b.title = tip ?? label;
             b.addEventListener("click", (e) => {
                 e.stopPropagation();
                 click();
@@ -7217,17 +8139,20 @@
                     const s = v.trim().toLowerCase();
                     if (s === "bylayer")
                         this.doc.color = "bylayer";
-                    else if (Number(s) >= 1 && Number(s) <= 255)
+                    else if (Number.isInteger(Number(s)) && Number(s) >= 1 && Number(s) <= 255)
                         this.doc.color = Number(s);
+                    else
+                        this.echo("Color must be bylayer or a whole number from 1 to 255.");
                     this.doc.bump();
                     this.syncChrome();
                 }));
-                this.propBox.appendChild(this.field("Linetype", String(this.doc.lt), (v) => {
-                    const s = v.trim().toLowerCase();
-                    if (entities_ts_1.LINETYPES.includes(s) || s === "bylayer") {
-                        this.doc.lt = s;
-                        this.doc.bump();
-                    }
+                this.propBox.appendChild(this.selectField("Linetype", ["bylayer", ...entities_ts_1.LINETYPES], String(this.doc.lt), (v) => {
+                    this.doc.lt = v;
+                    this.doc.bump();
+                }));
+                this.propBox.appendChild(this.selectField("Lineweight", ["bylayer", ...entities_ts_1.WEIGHTS.map(String)], String(this.doc.lw), (v) => {
+                    this.doc.lw = v === "bylayer" ? "bylayer" : Number(v);
+                    this.doc.bump();
                 }));
                 return;
             }
@@ -7295,8 +8220,18 @@
             }
         }
         numPair(label, p, commit) {
-            this.propBox.appendChild(this.field(`${label} X`, String(round4(p.x)), (v) => commit({ x: Number(v), y: p.y })));
-            this.propBox.appendChild(this.field(`${label} Y`, String(round4(p.y)), (v) => commit({ x: p.x, y: Number(v) })));
+            this.propBox.appendChild(this.field(`${label} X`, String(round4(p.x)), (v) => {
+                if (v.trim() !== "" && Number.isFinite(Number(v)))
+                    commit({ x: Number(v), y: p.y });
+                else
+                    this.syncProps();
+            }));
+            this.propBox.appendChild(this.field(`${label} Y`, String(round4(p.y)), (v) => {
+                if (v.trim() !== "" && Number.isFinite(Number(v)))
+                    commit({ x: p.x, y: Number(v) });
+                else
+                    this.syncProps();
+            }));
         }
         field(label, value, commit) {
             const lab = document.createElement("label");
@@ -7361,14 +8296,28 @@
             }
         }
         buildMenus(bar) {
+            const cmd = (n) => () => this.launch(n);
             const menus = [
                 {
                     label: "File",
                     items: [
                         { label: "New", run: () => void this.newDrawing() },
-                        { label: "Open DXF…", run: () => this.host.querySelector(".nl-file").click() },
-                        { label: "Save DXF", run: () => this.save() },
+                        { label: "Open DXF…", run: () => this.openDialog() },
+                        { label: "Save DXF  (Ctrl+S)", run: () => this.save() },
+                        { label: "Save as…", run: cmd("SAVEAS") },
+                        { label: "Export SVG", run: () => this.exportImage("svg") },
+                        { label: "Export PNG", run: () => this.exportImage("png") },
                         { label: "Open sample plate", run: () => void this.openSample() },
+                    ],
+                },
+                {
+                    label: "Edit",
+                    items: [
+                        { label: "Undo  (Ctrl+Z)", run: () => this.undo() },
+                        { label: "Redo  (Ctrl+Y)", run: () => this.redo() },
+                        { label: "Select all  (Ctrl+A)", run: () => this.selectAll() },
+                        { label: "Deselect  (Esc)", run: () => this.deselect() },
+                        { label: "Delete selection  (Del)", run: () => this.eraseSelection() },
                     ],
                 },
                 {
@@ -7380,9 +8329,24 @@
                     items: commands_ts_1.COMMANDS.filter((c) => c.group === "Modify").map((c) => ({ label: c.label, run: () => this.launch(c.name) })),
                 },
                 {
+                    label: "Format",
+                    items: ["LAYER", "COLOR", "LINETYPE", "LINEWEIGHT", "LTSCALE", "UNITS", "DIMSTYLE", "SNAP", "POLARANG"].map((n) => {
+                        const c = commands_ts_1.COMMANDS.find((x) => x.name === n);
+                        return { label: c ? c.label : n, run: cmd(n) };
+                    }),
+                },
+                {
+                    label: "Tools",
+                    items: ["DIST", "AREA", "LIST", "ID", "BLOCK", "INSERT"].map((n) => {
+                        const c = commands_ts_1.COMMANDS.find((x) => x.name === n);
+                        return { label: c ? c.label : n, run: cmd(n) };
+                    }),
+                },
+                {
                     label: "View",
                     items: [
                         { label: "Zoom extents", run: () => this.zoomExtents() },
+                        { label: "Zoom window", run: cmd("ZOOM") },
                         { label: "Zoom previous", run: () => this.zoomPrev() },
                         { label: "Pan", run: () => this.launch("PAN") },
                         { label: "Theme: Ink", run: () => this.setTheme("ink") },
@@ -7418,6 +8382,13 @@
                     this.closePop();
                     pop.hidden = !open;
                     this.menuEl = pop;
+                });
+                btn.addEventListener("pointerenter", () => {
+                    if (this.menuEl && !this.menuEl.hidden && this.menuEl !== pop) {
+                        this.closePop();
+                        pop.hidden = false;
+                        this.menuEl = pop;
+                    }
                 });
                 wrap.append(btn, pop);
                 bar.appendChild(wrap);
@@ -7642,6 +8613,14 @@
                     this.input.value = this.typed[this.typedAt] ?? "";
                     return;
                 }
+                if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    if (!this.typed.length)
+                        return;
+                    this.typedAt = Math.min(this.typed.length, this.typedAt + 1);
+                    this.input.value = this.typed[this.typedAt] ?? "";
+                    return;
+                }
                 if (e.key === "Enter" || (e.key === " " && this.waiter?.mode !== "text")) {
                     e.preventDefault();
                     this.submitInput(this.input.value);
@@ -7655,6 +8634,9 @@
                 this.doc.currentLayer = this.layerSelect.value;
                 this.doc.bump();
                 this.syncChrome();
+                this.layerSelect.blur();
+                if (!window.matchMedia("(pointer: coarse)").matches)
+                    this.input.focus();
             });
             root.querySelector(".nl-file").addEventListener("change", (e) => {
                 const input = e.target;
@@ -7719,11 +8701,32 @@
             }
             if ((e.key === "a" || e.key === "A") && (e.ctrlKey || e.metaKey) && !this.waiter) {
                 e.preventDefault();
-                this.selection = new Set(this.doc.all().filter((en) => this.canSelect(en)).map((en) => en.id));
-                this.refreshGrips();
-                this.syncProps();
-                this.requestDraw();
+                this.selectAll();
                 return;
+            }
+            if (target !== this.input && !e.ctrlKey && !e.metaKey && !e.altKey && !this.host.querySelector(".nl-modal")) {
+                const onButton = target instanceof HTMLButtonElement;
+                if (e.key.length === 1 && !(e.key === " " && onButton)) {
+                    e.preventDefault();
+                    this.input.focus();
+                    if (e.key === " " && this.waiter?.mode !== "text")
+                        this.submitInput(this.input.value);
+                    else
+                        this.input.value += e.key;
+                    return;
+                }
+                if (e.key === "Enter" && !onButton) {
+                    e.preventDefault();
+                    this.input.focus();
+                    this.submitInput(this.input.value);
+                    return;
+                }
+                if (e.key === "Backspace" && this.input.value) {
+                    e.preventDefault();
+                    this.input.focus();
+                    this.input.value = this.input.value.slice(0, -1);
+                    return;
+                }
             }
             if ((e.key === "Delete" || e.key === "Backspace") && !this.waiter && target !== this.input) {
                 const ents = this.editable(this.selectionEnts());
