@@ -1054,10 +1054,12 @@
                 c.b = fn(c.b);
                 return c;
             case "hatch":
+            case "region":
                 c.loops = c.loops.map((loop) => {
                     if ("circle" in loop)
-                        return { circle: { c: fn(loop.circle.c), r: loop.circle.r * sc } };
+                        return { ...loop, circle: { c: fn(loop.circle.c), r: loop.circle.r * sc } };
                     return {
+                        ...loop,
                         closed: loop.closed,
                         pts: loop.pts.map((p) => {
                             const q = fn(p);
@@ -1215,7 +1217,8 @@
             case "xline":
             case "ray":
                 return { minx: -1e9, miny: -1e9, maxx: 1e9, maxy: 1e9 };
-            case "hatch": {
+            case "hatch":
+            case "region": {
                 let b = math_ts_1.EMPTY;
                 for (const loop of e.loops) {
                     if ("circle" in loop) {
@@ -1353,7 +1356,8 @@
             }
             case "dim":
                 return explodeDim(e).flatMap((c) => (c.type === "line" ? curvesOf(c, ctx) : []));
-            case "hatch": {
+            case "hatch":
+            case "region": {
                 const curves = [];
                 for (const loop of e.loops) {
                     if ("circle" in loop)
@@ -1376,7 +1380,7 @@
         }
         if (e.type === "point")
             return (0, math_ts_1.dist)(p, e.p);
-        if (e.type === "hatch") {
+        if (e.type === "hatch" || e.type === "region") {
             if (hatchContains(e, p))
                 return 0;
         }
@@ -1672,7 +1676,8 @@
                     return translateEnt(e, delta);
                 return moved ? d : null;
             }
-            case "hatch": {
+            case "hatch":
+            case "region": {
                 const c = cloneEnt(e);
                 let moved = false;
                 c.loops = c.loops.map((loop) => {
@@ -1731,7 +1736,8 @@
                     return null;
                 return placedInsert(e, block).map(retag);
             }
-            case "hatch": {
+            case "hatch":
+            case "region": {
                 const out = [];
                 for (const loop of e.loops) {
                     if ("circle" in loop)
@@ -2252,6 +2258,12 @@
                 return `INSERT  ${e.name}  @ ${e.p.x.toFixed(4)},${e.p.y.toFixed(4)}`;
             case "hatch":
                 return `HATCH  ${e.solid ? "SOLID" : e.pattern}  scale ${e.scale}`;
+            case "region": {
+                const adds = e.loops.filter((l) => l.sign !== -1).length;
+                const subs = e.loops.length - adds;
+                const mats = [...new Set(e.loops.filter((l) => l.mat && l.sign !== -1).map((l) => l.mat.name || `E=${l.mat.E ?? "?"}`))];
+                return `REGION  ${adds} added, ${subs} removed${mats.length ? "  [" + mats.join(", ") + "]" : ""}`;
+            }
             case "dim":
                 return `DIMENSION  ${e.dim.kind}`;
             case "donut":
@@ -2679,8 +2691,9 @@
             push("2", layer.name, "70", String(flags), "62", String(col), "6", layer.lt.toUpperCase(), "370", String(Math.round(layer.lw * 100)));
         }
         push("0", "ENDTAB");
-        push("0", "TABLE", "2", "APPID", "5", hx(), "100", "AcDbSymbolTable", "70", "1");
+        push("0", "TABLE", "2", "APPID", "5", hx(), "100", "AcDbSymbolTable", "70", "2");
         push("0", "APPID", "5", hx(), "100", "AcDbSymbolTableRecord", "100", "AcDbRegAppTableRecord", "2", "ACAD", "70", "0");
+        push("0", "APPID", "5", hx(), "100", "AcDbSymbolTableRecord", "100", "AcDbRegAppTableRecord", "2", "NORTHLINE", "70", "0");
         push("0", "ENDTAB");
         const recNames = ["*Model_Space", "*Paper_Space", ...[...doc.blocks.values()].map((bl) => bl.name)];
         push("0", "TABLE", "2", "BLOCK_RECORD", "5", hx(), "100", "AcDbSymbolTable", "70", String(recNames.length));
@@ -2802,6 +2815,19 @@
                 return;
             case "hatch":
                 writeHatch(out, e);
+                return;
+            case "region":
+                e.loops.forEach((loop, i) => {
+                    const tag = { r: e.id, i, n: e.loops.length, s: loop.sign === -1 ? -1 : 1 };
+                    if (loop.mat)
+                        tag.m = loop.mat;
+                    const base = { layer: e.layer, color: e.color, lt: e.lt, lw: e.lw };
+                    if ("circle" in loop)
+                        writeEntity(out, { ...base, id: e.id, type: "circle", c: loop.circle.c, r: loop.circle.r });
+                    else
+                        writePolyline(out, { ...base, id: e.id, type: "polyline", pts: loop.pts, closed: true, width: 0 });
+                    push("1001", "NORTHLINE", "1000", JSON.stringify(tag).slice(0, 250));
+                });
                 return;
             case "dim":
                 for (const part of (0, entities_ts_1.explodeDim)(e))
@@ -3072,8 +3098,18 @@
                     }
                 }
                 const ent = entityFrom(rec.type, rec.bag, takeId, warnings);
-                if (ent)
+                if (ent) {
+                    const k1001 = rec.bag.findIndex((q) => q.c === 1001 && q.v.trim() === "NORTHLINE");
+                    if (k1001 >= 0 && rec.bag[k1001 + 1]?.c === 1000) {
+                        try {
+                            ent.__rg = JSON.parse(rec.bag[k1001 + 1].v);
+                        }
+                        catch {
+                            /* not ours */
+                        }
+                    }
                     entities.push(ent);
+                }
                 else if (!["SEQEND", "VERTEX", "ENDBLK", "ENDTAB", "TABLE"].includes(t)) {
                     if (t !== "VIEWPORT" && t !== "DIMENSION" && t !== "ATTDEF" && t !== "ATTRIB")
                         warnings.push(`Skipped ${t}`);
@@ -3107,7 +3143,33 @@
         }
         if (!doc.layers.some((l) => l.name.toLowerCase() === doc.currentLayer.toLowerCase()))
             doc.currentLayer = "0";
-        for (const e of entities)
+        // Rebuild regions from the loops Northline tagged when it saved them.
+        const groups = new Map();
+        const plain = [];
+        for (const e of entities) {
+            if (e.__rg && e.__rg.r && (e.type === "polyline" || e.type === "circle")) {
+                if (!groups.has(e.__rg.r))
+                    groups.set(e.__rg.r, []);
+                groups.get(e.__rg.r).push(e);
+            }
+            else {
+                delete e.__rg;
+                plain.push(e);
+            }
+        }
+        for (const members of groups.values()) {
+            members.sort((a, b) => a.__rg.i - b.__rg.i);
+            const first = members[0];
+            const loops = members.map((m) => {
+                const base = m.type === "circle" ? { circle: { c: m.c, r: m.r } } : { pts: m.pts, closed: true };
+                const loop = { ...base, sign: m.__rg.s === -1 ? -1 : 1 };
+                if (m.__rg.m)
+                    loop.mat = m.__rg.m;
+                return loop;
+            });
+            plain.push({ id: takeId(), type: "region", layer: first.layer, color: first.color, lt: first.lt, lw: first.lw, loops });
+        }
+        for (const e of plain)
             doc.add(e);
         for (const b of blocks.values())
             doc.blocks.set(b.name.toLowerCase(), b);
@@ -3917,11 +3979,11 @@
         drawAxes(ctx, view, theme);
         const list = doc.all();
         for (const e of list) {
-            if (e.type === "hatch" && (0, entities_ts_1.visibleEnt)(e, doc.layers))
+            if ((e.type === "hatch" || e.type === "region") && (0, entities_ts_1.visibleEnt)(e, doc.layers))
                 drawEntity(ctx, view, doc, e, theme, false, opts.lwt);
         }
         for (const e of list) {
-            if (e.type !== "hatch" && (0, entities_ts_1.visibleEnt)(e, doc.layers))
+            if (e.type !== "hatch" && e.type !== "region" && (0, entities_ts_1.visibleEnt)(e, doc.layers))
                 drawEntity(ctx, view, doc, e, theme, false, opts.lwt);
         }
         for (const id of overlay.selected) {
@@ -4056,6 +4118,10 @@
             drawHatch(ctx, view, e, paint.color);
             return;
         }
+        if (e.type === "region") {
+            drawRegion(ctx, view, e, paint.color);
+            return;
+        }
         if (e.type === "text") {
             drawText(ctx, view, e, paint.color);
             return;
@@ -4104,6 +4170,10 @@
         }
         if (e.type === "hatch") {
             drawHatch(ctx, view, e, color);
+            return;
+        }
+        if (e.type === "region") {
+            drawRegion(ctx, view, e, color);
             return;
         }
         if (e.type === "text") {
@@ -4250,6 +4320,71 @@
         ctx.textBaseline = "alphabetic";
         const lines = e.text.split("\n");
         lines.forEach((line, i) => ctx.fillText(line, 0, i * size * 1.25));
+        ctx.restore();
+    }
+    function regionLoopPoly(loop) {
+        if ("circle" in loop) {
+            const { c, r } = loop.circle;
+            return Array.from({ length: 96 }, (_, i) => ({ x: c.x + Math.cos((i / 96) * math_ts_1.TAU) * r, y: c.y + Math.sin((i / 96) * math_ts_1.TAU) * r }));
+        }
+        return (0, geom_ts_1.tessellate)(loop.pts, true);
+    }
+    function polySignedArea(poly) {
+        let a = 0;
+        for (let i = 0; i < poly.length; i++) {
+            const p = poly[i];
+            const q = poly[(i + 1) % poly.length];
+            a += p.x * q.y - q.x * p.y;
+        }
+        return a / 2;
+    }
+    function polyHas(poly, p) {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const a = poly[i];
+            const b = poly[j];
+            if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y || 1e-18) + a.x)
+                inside = !inside;
+        }
+        return inside;
+    }
+    /** A region: tinted fill where material is added, dashed outline where it is removed. */
+    function drawRegion(ctx, view, e, color) {
+        const items = e.loops.map((loop) => ({ loop, poly: regionLoopPoly(loop), sub: loop.sign === -1 }));
+        ctx.save();
+        ctx.beginPath();
+        for (const it of items) {
+            // Only a removal that sits inside some added loop can punch a hole in the fill.
+            if (it.sub && !items.some((o) => !o.sub && polyHas(o.poly, it.poly[0])))
+                continue;
+            const ccw = polySignedArea(it.poly) > 0;
+            const pts = ccw === !it.sub ? it.poly : [...it.poly].reverse();
+            pts.forEach((p, i) => {
+                const s = w2s(view, p);
+                if (i === 0)
+                    ctx.moveTo(s.x, s.y);
+                else
+                    ctx.lineTo(s.x, s.y);
+            });
+            ctx.closePath();
+        }
+        ctx.fillStyle = color;
+        ctx.globalAlpha = 0.16;
+        ctx.fill("nonzero");
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.4;
+        for (const it of items) {
+            ctx.setLineDash(it.sub ? [5, 3] : []);
+            ctx.beginPath();
+            if ("circle" in it.loop) {
+                const s = w2s(view, it.loop.circle.c);
+                ctx.arc(s.x, s.y, Math.abs(it.loop.circle.r * view.ppm), 0, math_ts_1.TAU);
+            }
+            else
+                tracePoly(ctx, view, it.loop.pts, true);
+            ctx.stroke();
+        }
         ctx.restore();
     }
     function drawHatch(ctx, view, e, color) {
@@ -5265,9 +5400,10 @@
     }
     async function hatch(io) {
         io.ensureDraw();
-        const how = await io.choose("Hatch by [Point/Select] <Point>:", [
+        const how = await io.choose("Hatch by [Point/Select/Region] <Point>:", [
             { name: "Point", aliases: ["p"] },
             { name: "Select", aliases: ["s"] },
+            { name: "Region", aliases: ["r"] },
         ], "Point");
         const pattern = await io.choose("Pattern [Solid/ANSI31/ANSI32/ANSI37/Dots] <ANSI31>:", [
             { name: "Solid", aliases: ["s"] },
@@ -5282,7 +5418,16 @@
         const angle = ang.t === "num" ? ang.v : 0;
         const solid = pattern === "Solid";
         const loops = [];
-        if (how === "Select") {
+        if (how === "Region") {
+            const ents = await io.select("Select regions:");
+            for (const e of ents)
+                if (e.type === "region")
+                    for (const l of e.loops)
+                        loops.push(plainLoop(l));
+            if (!loops.length)
+                return void io.info("No regions in the selection.");
+        }
+        else if (how === "Select") {
             const ents = await io.select("Select closed objects:");
             for (const e of ents) {
                 const loop = loopOf(e);
@@ -5297,6 +5442,13 @@
                 const p = await io.point(loops.length ? "Pick another internal point (Enter to finish):" : "Pick internal point:");
                 if (p.t !== "point")
                     break;
+                const reg = regionAt(io.doc, p.p);
+                if (reg) {
+                    for (const l of reg.loops)
+                        loops.push(plainLoop(l));
+                    io.info("Using the region under that point. Pick another point or press Enter.");
+                    continue;
+                }
                 const found = smallestContainer(io.doc, p.p);
                 if (!found) {
                     io.info("No closed boundary contains that point.");
@@ -5327,6 +5479,583 @@
             }));
         });
         io.info("Hatch created.");
+    }
+
+    // ======================= REGION / MASSPROP =======================
+    function loopPoly(loop) {
+        if ("circle" in loop) {
+            const { c, r } = loop.circle;
+            return Array.from({ length: 96 }, (_, i) => ({ x: c.x + Math.cos((i / 96) * math_ts_1.TAU) * r, y: c.y + Math.sin((i / 96) * math_ts_1.TAU) * r }));
+        }
+        return (0, geom_ts_1.tessellate)(loop.pts, true);
+    }
+    function plainLoop(loop) {
+        return "circle" in loop ? { circle: { c: { ...loop.circle.c }, r: loop.circle.r } } : { pts: loop.pts.map((p) => ({ ...p })), closed: true };
+    }
+    /** Closed shapes that can bound a region, as loops with an explicit sign (donuts give an outer + and an inner -). */
+    function regionLoopsOf(e) {
+        if (e.type === "donut")
+            return [{ circle: { c: { ...e.c }, r: e.or }, sign: 1 }, { circle: { c: { ...e.c }, r: e.ir }, sign: -1 }];
+        const l = loopOf(e);
+        return l ? [{ ...plainLoop(l), sign: 1 }] : [];
+    }
+    function loopArea(loop) {
+        return Math.abs(polyArea(loopPoly(loop)));
+    }
+    function polyArea(poly) {
+        let a = 0;
+        for (let i = 0; i < poly.length; i++) {
+            const p = poly[i];
+            const q = poly[(i + 1) % poly.length];
+            a += p.x * q.y - q.x * p.y;
+        }
+        return a / 2;
+    }
+    /** Even-odd nesting: shapes inside an odd number of others are holes. */
+    function nestSigns(loops) {
+        const areas = loops.map(loopArea);
+        return loops.map((l, i) => {
+            let depth = 0;
+            for (let j = 0; j < loops.length; j++)
+                if (j !== i && areas[j] > areas[i] && loopContains(loops[j], loopSample(l)))
+                    depth++;
+            return depth % 2 === 0 ? 1 : -1;
+        });
+    }
+    /** Two loops of the same sign that overlap would be counted twice; sample the overlap rather than clip it. */
+    function regionWarnings(loops) {
+        const out = [];
+        const polys = loops.map(loopPoly);
+        for (let i = 0; i < loops.length; i++) {
+            for (let j = i + 1; j < loops.length; j++) {
+                if ((loops[i].sign === -1) !== (loops[j].sign === -1))
+                    continue;
+                const small = loopArea(loops[i]) <= loopArea(loops[j]) ? i : j;
+                const big = small === i ? j : i;
+                let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+                for (const p of polys[small]) {
+                    minx = Math.min(minx, p.x);
+                    miny = Math.min(miny, p.y);
+                    maxx = Math.max(maxx, p.x);
+                    maxy = Math.max(maxy, p.y);
+                }
+                let inSmall = 0;
+                let inBoth = 0;
+                const N = 28;
+                for (let a = 0; a < N; a++) {
+                    for (let b = 0; b < N; b++) {
+                        const p = { x: minx + ((a + 0.4142) / N) * (maxx - minx), y: miny + ((b + 0.7321) / N) * (maxy - miny) };
+                        if (!pointIn(p, polys[small]))
+                            continue;
+                        inSmall++;
+                        if (pointIn(p, polys[big]))
+                            inBoth++;
+                    }
+                }
+                if (inSmall && inBoth / inSmall > 0.002) {
+                    const pct = Math.round((100 * inBoth) / inSmall);
+                    out.push(`Loops ${small + 1} and ${big + 1} (both ${loops[i].sign === -1 ? "removed" : "added"}) overlap by about ${pct}% of the smaller one, so that area is counted twice.`);
+                }
+            }
+        }
+        return out;
+    }
+    async function regionCmd(io) {
+        io.ensureDraw();
+        const first = await io.choose("Region [New/Edit] <New>:", [{ name: "New", aliases: ["n"] }, { name: "Edit", aliases: ["e"] }], "New");
+        let loops = [];
+        let target = null;
+        if (first === "Edit") {
+            const hit = await io.pick("Select a region to edit:");
+            if (hit.t !== "ent" || hit.ent.type !== "region")
+                return void io.info("That is not a region.");
+            target = hit.ent;
+            loops = structuredClone(target.loops);
+        }
+        let sign = 1;
+        let mat = null;
+        const batches = [];
+        const refresh = () => io.preview(loops.length ? [io.make({ type: "region", loops: structuredClone(loops) })] : []);
+        const addLoops = (list, s) => {
+            let n = 0;
+            for (const l of list) {
+                const entry = { ...plainLoop(l), sign: l.sign ?? s };
+                if (entry.sign !== -1 && mat)
+                    entry.mat = { ...mat };
+                loops.push(entry);
+                n++;
+            }
+            batches.push(n);
+        };
+        refresh();
+        try {
+            while (true) {
+                const msg = `Region (${sign === 1 ? "adding" : "removing"}): pick a point inside a boundary, or [Select/Add/Subtract/Material/Assign/Undo/Done] <Done>:`;
+                const r = await io.point(msg, {
+                    keywords: [
+                        { name: "Select", aliases: ["s"] },
+                        { name: "Add", aliases: ["a"] },
+                        { name: "Subtract", aliases: ["sub", "r", "remove"] },
+                        { name: "Material", aliases: ["m"] },
+                        { name: "Assign", aliases: ["as"] },
+                        { name: "Undo", aliases: ["u"] },
+                        { name: "Done", aliases: ["d"] },
+                    ],
+                });
+                if (r.t === "none")
+                    break;
+                if (r.t === "kw") {
+                    if (r.name === "Done")
+                        break;
+                    if (r.name === "Add")
+                        sign = 1;
+                    else if (r.name === "Subtract")
+                        sign = -1;
+                    else if (r.name === "Undo") {
+                        const n = batches.pop() ?? 0;
+                        loops.splice(loops.length - n, n);
+                        refresh();
+                    }
+                    else if (r.name === "Material") {
+                        const name = (await io.text("Material name (Enter to skip):")).trim();
+                        const E = await io.number("Elastic modulus E (Enter to skip):");
+                        const rho = await io.number("Density (Enter to skip):");
+                        const nu = await io.number("Poisson's ratio (Enter to skip):");
+                        const m = {};
+                        if (name)
+                            m.name = name;
+                        if (E.t === "num" && E.v > 0)
+                            m.E = E.v;
+                        if (rho.t === "num" && rho.v > 0)
+                            m.rho = rho.v;
+                        if (nu.t === "num" && nu.v > -1 && nu.v < 0.5)
+                            m.nu = nu.v;
+                        mat = Object.keys(m).length ? m : null;
+                        io.info(mat ? `Material for new loops: ${JSON.stringify(mat)}` : "No material (geometry only).");
+                    }
+                    else if (r.name === "Select") {
+                        const ents = await io.select("Select closed objects:");
+                        const found = ents.flatMap(regionLoopsOf);
+                        if (!found.length) {
+                            io.info("No closed objects in the selection.");
+                            continue;
+                        }
+                        if (sign === 1) {
+                            const raw = found.filter((l) => l.sign === 1);
+                            const nest = nestSigns(raw);
+                            raw.forEach((l, i) => (l.sign = nest[i]));
+                            addLoops(found, 1);
+                        }
+                        else
+                            addLoops(found.map((l) => ({ ...l, sign: -1 })), -1);
+                        io.setSelection([]);
+                        refresh();
+                        io.info(`${found.length} loop${found.length === 1 ? "" : "s"} ${sign === 1 ? "added" : "removed"}.`);
+                    }
+                    else if (r.name === "Assign") {
+                        if (!mat)
+                            io.info("Set a material first (Material option).");
+                        else {
+                            const at = await io.point("Pick a point inside the added loop to give it this material:");
+                            if (at.t === "point") {
+                                const hit = loops
+                                    .filter((l) => l.sign !== -1 && loopContains(l, at.p))
+                                    .sort((a, b) => loopArea(a) - loopArea(b))[0];
+                                if (hit) {
+                                    hit.mat = { ...mat };
+                                    io.info("Material assigned.");
+                                }
+                                else
+                                    io.info("No added loop there.");
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if (r.t !== "point")
+                    break;
+                const found = smallestContainer(io.doc, r.p);
+                if (!found) {
+                    io.info("No closed boundary contains that point.");
+                    continue;
+                }
+                const outer = regionLoopsOf(found)[0];
+                if (!outer)
+                    continue;
+                if (sign === 1) {
+                    const list = [{ ...outer, sign: 1 }, ...islandsOf(io.doc, found).map((l) => ({ ...plainLoop(l), sign: -1 }))];
+                    addLoops(list, 1);
+                    io.info(`Added a boundary${list.length > 1 ? ` and ${list.length - 1} hole${list.length > 2 ? "s" : ""}` : ""}.`);
+                }
+                else {
+                    addLoops([{ ...outer, sign: -1 }], -1);
+                    io.info("Boundary removed.");
+                }
+                refresh();
+            }
+        }
+        catch (err) {
+            io.preview(null);
+            throw err;
+        }
+        io.preview(null);
+        if (!loops.length)
+            return;
+        for (const w of regionWarnings(loops))
+            io.info("Warning: " + w);
+        io.transact(() => {
+            if (target) {
+                const live = io.doc.get(target.id);
+                if (live)
+                    live.loops = loops;
+            }
+            else
+                io.doc.add(io.make({ type: "region", loops }));
+        });
+        const adds = loops.filter((l) => l.sign !== -1).length;
+        io.info(`Region ${target ? "updated" : "created"}: ${adds} added, ${loops.length - adds} removed. Run MASSPROP to get its properties.`);
+    }
+    // ---- exact section integrals (Green's theorem, Gauss-Legendre per segment) ----
+    const GL8 = {
+        x: [-0.9602898564975363, -0.7966664774136267, -0.5255324099163290, -0.1834346424956498, 0.1834346424956498, 0.5255324099163290, 0.7966664774136267, 0.9602898564975363],
+        w: [0.1012285362903763, 0.2223810344533745, 0.3137066458778873, 0.3626837833783620, 0.3626837833783620, 0.3137066458778873, 0.2223810344533745, 0.1012285362903763],
+    };
+    function loopSegments(loop) {
+        if ("circle" in loop)
+            return [{ k: "arc", c: loop.circle.c, r: loop.circle.r, a0: 0, sw: math_ts_1.TAU }];
+        const segs = [];
+        const n = loop.pts.length;
+        for (let i = 0; i < n; i++) {
+            const p = loop.pts[i];
+            const q = loop.pts[(i + 1) % n];
+            const arc = p.b ? (0, geom_ts_1.bulgeArc)(p, q, p.b) : null;
+            if (arc)
+                segs.push({ k: "arc", c: arc.c, r: arc.r, a0: arc.a0, sw: arc.sweep });
+            else if (Math.hypot(q.x - p.x, q.y - p.y) > 0)
+                segs.push({ k: "line", p, q });
+        }
+        return segs;
+    }
+    function loopIntegrals(loop, ref) {
+        const acc = { A: 0, Qx: 0, Qy: 0, Ixx: 0, Iyy: 0, Ixy: 0, P: 0 };
+        let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+        const see = (x, y) => {
+            minx = Math.min(minx, x);
+            miny = Math.min(miny, y);
+            maxx = Math.max(maxx, x);
+            maxy = Math.max(maxy, y);
+        };
+        for (const s of loopSegments(loop)) {
+            const pieces = s.k === "arc" ? Math.max(1, Math.ceil(Math.abs(s.sw) / (Math.PI / 8))) : 1;
+            if (s.k === "arc") {
+                acc.P += s.r * Math.abs(s.sw);
+                see(s.c.x + s.r * Math.cos(s.a0), s.c.y + s.r * Math.sin(s.a0));
+                see(s.c.x + s.r * Math.cos(s.a0 + s.sw), s.c.y + s.r * Math.sin(s.a0 + s.sw));
+                for (let q = 0; q < 4; q++) {
+                    const ang = (q * Math.PI) / 2;
+                    const rel = s.sw >= 0 ? (0, math_ts_1.ccwSweep)(s.a0, ang) : (0, math_ts_1.ccwSweep)(ang, s.a0);
+                    if (rel <= Math.abs(s.sw) + 1e-12)
+                        see(s.c.x + s.r * Math.cos(ang), s.c.y + s.r * Math.sin(ang));
+                }
+            }
+            else {
+                acc.P += Math.hypot(s.q.x - s.p.x, s.q.y - s.p.y);
+                see(s.p.x, s.p.y);
+                see(s.q.x, s.q.y);
+            }
+            for (let k = 0; k < pieces; k++) {
+                const t0 = k / pieces;
+                const t1 = (k + 1) / pieces;
+                for (let g = 0; g < 8; g++) {
+                    const t = (t0 + t1) / 2 + ((t1 - t0) / 2) * GL8.x[g];
+                    const w = GL8.w[g] * ((t1 - t0) / 2);
+                    let x, y, dx, dy;
+                    if (s.k === "arc") {
+                        const a = s.a0 + s.sw * t;
+                        x = s.c.x + s.r * Math.cos(a) - ref.x;
+                        y = s.c.y + s.r * Math.sin(a) - ref.y;
+                        dx = -s.r * s.sw * Math.sin(a);
+                        dy = s.r * s.sw * Math.cos(a);
+                    }
+                    else {
+                        x = s.p.x + (s.q.x - s.p.x) * t - ref.x;
+                        y = s.p.y + (s.q.y - s.p.y) * t - ref.y;
+                        dx = s.q.x - s.p.x;
+                        dy = s.q.y - s.p.y;
+                    }
+                    acc.A += w * x * dy;
+                    acc.Qy += w * 0.5 * x * x * dy;
+                    acc.Qx += w * -0.5 * y * y * dx;
+                    acc.Iyy += (w * x * x * x * dy) / 3;
+                    acc.Ixx += (w * -(y * y * y) * dx) / 3;
+                    acc.Ixy += w * 0.5 * x * x * y * dy;
+                }
+            }
+        }
+        const o = acc.A < 0 ? -1 : 1; // make every loop contribute with positive orientation
+        return {
+            A: acc.A * o, Qx: acc.Qx * o, Qy: acc.Qy * o, Ixx: acc.Ixx * o, Iyy: acc.Iyy * o, Ixy: acc.Ixy * o,
+            P: acc.P, box: { minx: minx - ref.x, miny: miny - ref.y, maxx: maxx - ref.x, maxy: maxy - ref.y },
+        };
+    }
+    function weighted(items, wf) {
+        let W = 0, Qx = 0, Qy = 0, Ixx = 0, Iyy = 0, Ixy = 0;
+        for (const it of items) {
+            const w = wf(it);
+            if (!w)
+                continue;
+            W += w * it.d.A;
+            Qx += w * it.d.Qx;
+            Qy += w * it.d.Qy;
+            Ixx += w * it.d.Ixx;
+            Iyy += w * it.d.Iyy;
+            Ixy += w * it.d.Ixy;
+        }
+        if (!(Math.abs(W) > 0))
+            return null;
+        const cx = Qy / W;
+        const cy = Qx / W;
+        const Ix = Ixx - W * cy * cy;
+        const Iy = Iyy - W * cx * cx;
+        let Ixy_c = Ixy - W * cx * cy;
+        if (Math.abs(Ixy_c) < 1e-11 * (Math.abs(Ix) + Math.abs(Iy)))
+            Ixy_c = 0; // round-off on symmetric sections
+        const avg = (Ix + Iy) / 2;
+        const R = Math.hypot((Ix - Iy) / 2, Ixy_c);
+        let th = 0.5 * Math.atan2(-2 * Ixy_c, Ix - Iy);
+        const along = avg + ((Ix - Iy) / 2) * Math.cos(2 * th) - Ixy_c * Math.sin(2 * th);
+        if (along < avg)
+            th += Math.PI / 2;
+        const deg = ((((th * 180) / Math.PI) % 180) + 180) % 180;
+        return { W, cx, cy, Ix, Iy, Ixy: Ixy_c, I1: avg + R, I2: avg - R, theta: deg };
+    }
+    function fmtNum(v) {
+        if (!Number.isFinite(v))
+            return "n/a";
+        if (v === 0 || Math.abs(v) < 1e-12 * 1)
+            return "0";
+        if (Math.abs(v) >= 1e7 || Math.abs(v) < 1e-4)
+            return v.toExponential(6);
+        return String(+v.toPrecision(10));
+    }
+    async function massprop(io) {
+        const ents = await io.select("Select regions or closed objects:");
+        const items = [];
+        const raw = [];
+        for (const e of ents) {
+            if (e.type === "region") {
+                for (const l of e.loops)
+                    items.push({ loop: l, sign: l.sign === -1 ? -1 : 1, mat: l.mat ?? null, from: "region" });
+            }
+            else
+                for (const l of regionLoopsOf(e)) {
+                    if (e.type === "donut")
+                        items.push({ loop: l, sign: l.sign, mat: null, from: "donut" });
+                    else
+                        raw.push({ loop: l, sign: 1, mat: null, from: "object" });
+                }
+        }
+        const nest = nestSigns(raw.map((r) => r.loop));
+        raw.forEach((r, i) => {
+            r.sign = nest[i];
+            items.push(r);
+        });
+        if (!items.length)
+            return void io.info("Nothing closed to measure: select regions, closed polylines, circles, ellipses or donuts.");
+        // optional default material for loops that carry none
+        let def = {};
+        const needDefault = items.some((it) => it.sign === 1 && !it.mat);
+        if (needDefault) {
+            while (true) {
+                const have = Object.keys(def).map((k) => `${k}=${def[k]}`).join(" ");
+                const k = await io.choose(`Material for unassigned loops${have ? " (" + have + ")" : ""} [Elastic/Density/Poisson/Go] <Go>:`, [
+                    { name: "Elastic", aliases: ["e", "E"] },
+                    { name: "Density", aliases: ["d", "rho"] },
+                    { name: "Poisson", aliases: ["p", "nu"] },
+                    { name: "Go", aliases: ["g"] },
+                ], "Go");
+                if (k === "Go")
+                    break;
+                const n = await io.number(k === "Elastic" ? "Elastic modulus E:" : k === "Density" ? "Density:" : "Poisson's ratio:");
+                if (n.t !== "num")
+                    continue;
+                if (k === "Elastic" && n.v > 0)
+                    def.E = n.v;
+                else if (k === "Density" && n.v > 0)
+                    def.rho = n.v;
+                else if (k === "Poisson" && n.v > -1 && n.v < 0.5)
+                    def.nu = n.v;
+                else
+                    io.info("Value out of range, ignored.");
+            }
+        }
+        for (const w of regionWarnings(items.map((it) => ({ ...it.loop, sign: it.sign }))))
+            io.info("Warning: " + w);
+        // ---- integrate everything relative to a local origin to avoid cancellation ----
+        let bx0 = Infinity, by0 = Infinity, bx1 = -Infinity, by1 = -Infinity;
+        for (const it of items)
+            for (const p of loopPoly(it.loop)) {
+                bx0 = Math.min(bx0, p.x);
+                by0 = Math.min(by0, p.y);
+                bx1 = Math.max(bx1, p.x);
+                by1 = Math.max(by1, p.y);
+            }
+        const ref = { x: (bx0 + bx1) / 2, y: (by0 + by1) / 2 };
+        for (const it of items)
+            it.d = loopIntegrals(it.loop, ref);
+        // materials: added loops take their own or the default; removed loops inherit the host they cut into
+        const adds = items.filter((it) => it.sign === 1);
+        for (const it of adds)
+            it.m = it.mat ?? (Object.keys(def).length ? def : null);
+        for (const it of items.filter((x) => x.sign === -1)) {
+            if (it.mat) {
+                it.m = it.mat;
+                continue;
+            }
+            const host = adds.filter((a) => loopContains(a.loop, loopSample(it.loop))).sort((a, b) => a.d.A - b.d.A)[0];
+            it.m = host ? host.m : null;
+        }
+        const geo = weighted(items, (it) => it.sign);
+        if (!geo || geo.W <= 0)
+            return void io.info("The net area is zero or negative: check which loops are added and which removed.");
+        const anyE = items.some((it) => it.m && it.m.E > 0);
+        const anyRho = items.some((it) => it.m && it.m.rho > 0);
+        const anyNu = items.some((it) => it.m && it.m.E > 0 && it.m.nu !== undefined);
+        const stiff = anyE ? weighted(items, (it) => (it.m && it.m.E > 0 ? it.sign * it.m.E : 0)) : null;
+        const mass = anyRho ? weighted(items, (it) => (it.m && it.m.rho > 0 ? it.sign * it.m.rho : 0)) : null;
+        const shear = anyNu ? weighted(items, (it) => (it.m && it.m.E > 0 && it.m.nu !== undefined ? it.sign * (it.m.E / (2 * (1 + it.m.nu))) : 0)) : null;
+        // extremes (added loops only)
+        let ex0 = Infinity, ey0 = Infinity, ex1 = -Infinity, ey1 = -Infinity;
+        for (const it of adds) {
+            ex0 = Math.min(ex0, it.d.box.minx);
+            ey0 = Math.min(ey0, it.d.box.miny);
+            ex1 = Math.max(ex1, it.d.box.maxx);
+            ey1 = Math.max(ey1, it.d.box.maxy);
+        }
+        const perim = items.reduce((s, it) => s + it.d.P, 0);
+        const circles = items.length > 0 && items.every((it) => "circle" in it.loop);
+        const r0 = circles ? items[0].loop.circle : null;
+        const concentric = circles && items.every((it) => Math.hypot(it.loop.circle.c.x - r0.c.x, it.loop.circle.c.y - r0.c.y) <= 1e-6 * Math.max(1, r0.r));
+        const u = { 4: "mm", 5: "cm", 6: "m", 1: "in", 2: "ft" }[io.doc.units] ?? "units";
+        const X = (v) => v + ref.x;
+        const Y = (v) => v + ref.y;
+        const res = { units: u, geometry: {}, };
+        const L = [];
+        const sec = (t) => L.push({ head: t });
+        const row = (key, label, v, unit) => L.push({ key, label, v, unit });
+        sec("Geometry");
+        row("area", "Area A", geo.W, `${u}^2`);
+        row("boundary_length", "Boundary length", perim, u);
+        row("centroid_x", "Centroid X", X(geo.cx), u);
+        row("centroid_y", "Centroid Y", Y(geo.cy), u);
+        row("bbox_min_x", "Bounds min X", X(ex0), u);
+        row("bbox_min_y", "Bounds min Y", Y(ey0), u);
+        row("bbox_max_x", "Bounds max X", X(ex1), u);
+        row("bbox_max_y", "Bounds max Y", Y(ey1), u);
+        sec("Second moments of area about the centroid");
+        row("Ix", "Ix", geo.Ix, `${u}^4`);
+        row("Iy", "Iy", geo.Iy, `${u}^4`);
+        row("Ixy", "Ixy (product)", geo.Ixy, `${u}^4`);
+        row("Ip", "Polar Ix+Iy", geo.Ix + geo.Iy, `${u}^4`);
+        row("I1", "Principal I1 (max)", geo.I1, `${u}^4`);
+        row("I2", "Principal I2 (min)", geo.I2, `${u}^4`);
+        row("principal_angle_deg", "Angle of axis 1 from +X", geo.theta, "deg");
+        row("rx", "Radius of gyration rx", Math.sqrt(geo.Ix / geo.W), u);
+        row("ry", "Radius of gyration ry", Math.sqrt(geo.Iy / geo.W), u);
+        row("r1", "Radius of gyration r1", Math.sqrt(geo.I1 / geo.W), u);
+        row("r2", "Radius of gyration r2", Math.sqrt(geo.I2 / geo.W), u);
+        const yt = ey1 - geo.cy;
+        const yb = geo.cy - ey0;
+        const xr = ex1 - geo.cx;
+        const xl = geo.cx - ex0;
+        sec("Elastic section moduli");
+        if (yt > 1e-12)
+            row("Sx_top", "Sx (top fibre)", geo.Ix / yt, `${u}^3`);
+        if (yb > 1e-12)
+            row("Sx_bottom", "Sx (bottom fibre)", geo.Ix / yb, `${u}^3`);
+        if (xr > 1e-12)
+            row("Sy_right", "Sy (right fibre)", geo.Iy / xr, `${u}^3`);
+        if (xl > 1e-12)
+            row("Sy_left", "Sy (left fibre)", geo.Iy / xl, `${u}^3`);
+        sec("Torsion");
+        if (concentric) {
+            row("J", "J (concentric circles: exact)", geo.Ix + geo.Iy, `${u}^4`);
+            row("J_note", "", "J equals the polar moment for solid or hollow circular sections", "");
+        }
+        else
+            row("J_note", "J", "not computed: non-circular sections need a section FE solve", "");
+        if (stiff) {
+            const ref0 = adds.find((it) => it.m && it.m.E > 0).m;
+            sec("Stiffness (E-weighted)");
+            row("EA", "EA", stiff.W, `E*${u}^2`);
+            row("elastic_centroid_x", "Elastic centroid X", X(stiff.cx), u);
+            row("elastic_centroid_y", "Elastic centroid Y", Y(stiff.cy), u);
+            row("EIx", "EIx", stiff.Ix, `E*${u}^4`);
+            row("EIy", "EIy", stiff.Iy, `E*${u}^4`);
+            row("EIxy", "EIxy", stiff.Ixy, `E*${u}^4`);
+            row("EI1", "Principal EI1", stiff.I1, `E*${u}^4`);
+            row("EI2", "Principal EI2", stiff.I2, `E*${u}^4`);
+            row("EI_angle_deg", "Angle of EI axis 1 from +X", stiff.theta, "deg");
+            row("E_ref", "Reference E for transformed section", ref0.E, "");
+            row("A_transformed", "Transformed area EA/E_ref", stiff.W / ref0.E, `${u}^2`);
+            row("Ix_transformed", "Transformed Ix", stiff.Ix / ref0.E, `${u}^4`);
+            row("Iy_transformed", "Transformed Iy", stiff.Iy / ref0.E, `${u}^4`);
+            if (shear)
+                row("GA", "GA (no shear-area factor)", shear.W, `E*${u}^2`);
+            if (shear && concentric)
+                row("GJ", "GJ", shear.Ix + shear.Iy, `E*${u}^4`);
+            if (stiff.W <= 0 || stiff.Ix <= 0 || stiff.Iy <= 0)
+                io.info("Warning: stiffness terms are not positive; check materials on removed loops.");
+        }
+        if (mass) {
+            sec("Mass per unit length (extrusion direction)");
+            row("mass_per_length", "Mass per length (rho*A)", mass.W, `mass/${u}`);
+            row("mass_centroid_x", "Mass centroid X", X(mass.cx), u);
+            row("mass_centroid_y", "Mass centroid Y", Y(mass.cy), u);
+            row("rhoIx", "rho*Ix about centroid", mass.Ix, `mass*${u}`);
+            row("rhoIy", "rho*Iy about centroid", mass.Iy, `mass*${u}`);
+            row("rhoIxy", "rho*Ixy about centroid", mass.Ixy, `mass*${u}`);
+            row("polar_mass_inertia_per_length", "Polar mass inertia about z, per length", mass.Ix + mass.Iy, `mass*${u}`);
+        }
+        const lines = [];
+        const json = { units: u, loops: items.length, warnings: [] };
+        let curSec = null;
+        let csv = "section,quantity,value,unit\n";
+        for (const r of L) {
+            if (r.head) {
+                lines.push(`-- ${r.head} --`);
+                curSec = r.head;
+                json[curSec] = {};
+                continue;
+            }
+            if (typeof r.v === "string") {
+                lines.push(r.label ? `${r.label}: ${r.v}` : r.v);
+                json[curSec][r.key] = r.v;
+                continue;
+            }
+            lines.push(`${r.label} = ${fmtNum(r.v)}${r.unit ? "  (" + r.unit + ")" : ""}`);
+            json[curSec][r.key] = { value: r.v, unit: r.unit };
+            csv += `"${curSec}",${r.key},${r.v},"${r.unit}"\n`;
+        }
+        io.info(`Mass properties: ${items.filter((i) => i.sign === 1).length} added loop(s), ${items.filter((i) => i.sign === -1).length} removed.`);
+        for (const l of lines)
+            io.info(l);
+        io.showReport(`Mass properties (${items.filter((i) => i.sign === 1).length} added, ${items.filter((i) => i.sign === -1).length} removed loops)`, lines.join("\n"));
+        const out = await io.choose("Export [Json/Csv/Text/None] <None>:", [
+            { name: "Json", aliases: ["j"] },
+            { name: "Csv", aliases: ["c"] },
+            { name: "Text", aliases: ["t"] },
+            { name: "None", aliases: ["n"] },
+        ], "None");
+        if (out === "Json")
+            io.downloadText("massprop.json", JSON.stringify(json, null, 2), "application/json");
+        else if (out === "Csv")
+            io.downloadText("massprop.csv", csv, "text/csv");
+        else if (out === "Text") {
+            const at = await io.point("Specify insertion point for the report:");
+            if (at.t === "point")
+                io.transact(() => io.doc.add(io.make({ type: "text", p: at.p, h: io.doc.texth, rot: 0, text: lines.join("\n"), align: "left" })));
+        }
     }
     function loopOf(e) {
         if (e.type === "circle")
@@ -5375,6 +6104,19 @@
     }
     function loopSample(loop) {
         return "circle" in loop ? loop.circle.c : loop.pts[0];
+    }
+    function regionAt(doc, p) {
+        for (const e of doc.all()) {
+            if (e.type !== "region" || !(0, entities_ts_1.visibleEnt)(e, doc.layers))
+                continue;
+            let n = 0;
+            for (const l of e.loops)
+                if (loopContains(l, p))
+                    n += l.sign === -1 ? -1 : 1;
+            if (n > 0)
+                return e;
+        }
+        return null;
     }
     function smallestContainer(doc, p) {
         let best = null;
@@ -6746,6 +7488,8 @@
                     io.doc.bump();
                 }
             } },
+        { name: "REGION", aliases: ["reg"], group: "Tools", label: "Region", hint: "Build a section from added and removed closed boundaries", run: regionCmd },
+        { name: "MASSPROP", aliases: ["mp", "massprop"], group: "Tools", label: "Mass properties", hint: "Area, centroid, inertia, EA/EI and mass for regions or closed shapes", run: massprop },
         { name: "DIMSTYLE", aliases: ["dst", "dimtxt", "dimstyle"], group: "Format", label: "Dim style", hint: "Dimension text height and decimals for new dimensions", run: async (io) => {
                 const h = await io.number(`Dimension text height <${io.doc.dimtxt}>:`, { def: io.doc.dimtxt });
                 if (h.t === "num" && h.v > 0)
@@ -7322,6 +8066,26 @@
             this.refreshGrips();
             this.syncProps();
         }
+        showReport(title, text) {
+            let box = this.host.querySelector(".nl-report");
+            if (!box) {
+                box = document.createElement("div");
+                box.className = "nl-help nl-report";
+                box.innerHTML = `<div class="nl-help-card"><header><strong class="nl-report-title"></strong><span><button type="button" class="nl-help-x nl-report-copy">Copy</button> <button type="button" class="nl-help-x nl-report-close">Close</button></span></header><pre class="nl-report-body"></pre></div>`;
+                this.host.querySelector(".nl").appendChild(box);
+                box.querySelector(".nl-report-close").addEventListener("click", () => (box.hidden = true));
+                box.querySelector(".nl-report-copy").addEventListener("click", () => {
+                    const t = box.querySelector(".nl-report-body").textContent;
+                    void navigator.clipboard?.writeText(t).then(() => this.echo("Report copied."), () => this.echo("Copy failed: select the text instead."));
+                });
+            }
+            box.querySelector(".nl-report-title").textContent = title;
+            box.querySelector(".nl-report-body").textContent = text;
+            box.hidden = false;
+        }
+        downloadText(name, text, mime) {
+            this.download(new Blob([text], { type: mime }), name);
+        }
         download(blob, name) {
             const a = document.createElement("a");
             a.href = URL.createObjectURL(blob);
@@ -7447,6 +8211,11 @@
                         const anchor = e.align === "center" ? "middle" : e.align === "right" ? "end" : "start";
                         const tsp = lines.map((l, i) => `<tspan x="0" dy="${i === 0 ? 0 : e.h * 1.25}">${esc(l)}</tspan>`).join("");
                         out.push(`<text transform="translate(${X(e.p.x)} ${Y(e.p.y)}) rotate(${+(-(e.rot * 180) / Math.PI).toFixed(4)})" font-family="Arial, Helvetica, sans-serif" font-size="${e.h}" text-anchor="${anchor}" fill="${col}">${tsp}</text>`);
+                        break;
+                    }
+                    case "region": {
+                        const d = e.loops.map((l) => ("circle" in l ? `M${X(l.circle.c.x - l.circle.r)} ${Y(l.circle.c.y)}a${l.circle.r} ${l.circle.r} 0 1 0 ${2 * l.circle.r} 0a${l.circle.r} ${l.circle.r} 0 1 0 ${-2 * l.circle.r} 0Z` : pathOf(l.pts, true))).join("");
+                        out.push(`<path d="${d}" fill="${col}" fill-opacity="0.16" fill-rule="evenodd" stroke="${col}" stroke-width="${sw}"/>`);
                         break;
                     }
                     case "hatch": {
@@ -8337,7 +9106,7 @@
                 },
                 {
                     label: "Tools",
-                    items: ["DIST", "AREA", "LIST", "ID", "BLOCK", "INSERT"].map((n) => {
+                    items: ["DIST", "AREA", "LIST", "ID", "REGION", "MASSPROP", "BLOCK", "INSERT"].map((n) => {
                         const c = commands_ts_1.COMMANDS.find((x) => x.name === n);
                         return { label: c ? c.label : n, run: cmd(n) };
                     }),

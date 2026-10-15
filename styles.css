@@ -720,3 +720,11 @@ button:not(:disabled), [role="button"]:not(:disabled) { cursor: pointer; }
     grid-column: auto;
   }
 }
+
+.nl-report-body {
+  margin: 0;
+  padding: 0.7rem 0.9rem 1rem;
+  font: 0.78rem/1.5 ui-monospace, "Cascadia Mono", Consolas, monospace;
+  white-space: pre-wrap;
+  color: var(--nl-text);
+}
